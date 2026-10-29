@@ -729,3 +729,11 @@ var winsBootAttempts=0;var winsBootTimer=setInterval(function(){if(++winsBootAtt
 
 // Put the service's own on-boot and auto-restart flags back once the adapter is connected (see ComponentActions.selfStartup).
 var selfStartupAttempts=0,selfStartupBusy=false;var selfStartupTimer=setInterval(function(){if(++selfStartupAttempts>60){clearInterval(selfStartupTimer);return}if(selfStartupBusy||!platform.status().agent.connected)return;selfStartupBusy=true;inventory(true).then(function(d){if(d.registryError)throw Error(d.registryError);return ComponentActions.selfStartup(d.apps).reduce(function(p,cmd){return p.then(function(){return agentExecute(cmd,30000).then(function(r){registryAt=0;if(r.exit_code||r.timed_out)throw Error(r.stderr||r.stdout||'Startup flag not set')})})},Promise.resolve())}).then(function(){clearInterval(selfStartupTimer)}).catch(function(){}).finally(function(){selfStartupBusy=false})},5000);if(selfStartupTimer.unref)selfStartupTimer.unref();
+
+// Samsung telemetry that has no off switch of its own (no ConditionPathExists flag, /etc is read-only):
+// Tag Pro usage tagging and sp-kpi usage/power KPIs. Stopped once the adapter is connected after a start, and once
+// more three minutes later because Tag Pro waits for ps_agent and can come up late. A reboot starts them again.
+// Checked on the S90C: standby still suspends normally with both stopped (sp-kpi registers a power-off callback).
+var TELEMETRY_UNITS=['org.tizen.tv.tagpro-service-tv.service','org.tizen.tv.sp-kpi.service'];
+function stopTelemetry(){return agentExecute('systemctl stop '+TELEMETRY_UNITS.join(' ')+' 2>/dev/null; true',30000).catch(function(){});}
+var telemetryAttempts=0;var telemetryTimer=setInterval(function(){if(++telemetryAttempts>60){clearInterval(telemetryTimer);return}if(platform.status().agent.connected){clearInterval(telemetryTimer);stopTelemetry();var again=setTimeout(stopTelemetry,180000);if(again.unref)again.unref();}},5000);if(telemetryTimer.unref)telemetryTimer.unref();
