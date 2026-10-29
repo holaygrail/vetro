@@ -505,6 +505,7 @@ function runActions(actions) {
     var sent=0, skipped=[],mqttSent=0;
     return actions.reduce(function(chain,a){return chain.then(function(){
         var command;
+        if(a.type==='none')return;
         if(a.type==='mqtt'){bridge.publish(a.topic,a.payload);sent++;mqttSent++;return;}
         if(a.type==='launch')command='/usr/bin/app_launcher -s '+a.appId;
         else if(a.type==='key'){var key=control.nativeKey(a.key);command=key&&control.injectCommand(key);if(!command)throw new Error('unsupported native key: '+a.key);}
@@ -512,14 +513,34 @@ function runActions(actions) {
         return agentExecute(command,10000).then(function(r){if(r.exit_code||r.timed_out)throw new Error(r.stderr||'native action failed');sent++;});
     });},Promise.resolve()).then(function(){return {ok:true,sent:sent,skipped:skipped,transport:mqttSent?(mqttSent===sent?'mqtt':'mixed'):'native'};});
 }
-var actionQueue=Promise.resolve(), pendingActions=0, inputError=null;
-var physical=new PhysicalInput(agentExecute,function(event){
+var actionQueue=Promise.resolve(), pendingActions=0, inputError=null, lastPress=null;
+function physicalEvent(event){
     if(event.action!=='down'||event.decision!=='blocked')return;
+    // A press normally reaches one device only; skip the copy if IR and Bluetooth both report it.
+    var now=Date.now();
+    if(lastPress&&lastPress.code===event.code&&lastPress.node!==event.node&&now-lastPress.at<300)return;
+    lastPress={code:event.code,node:event.node,at:now};
     var actions=remap.resolve(remapStore.rules,'physical',String(event.code));
-    if(pendingActions>=8){inputPaused=true;physical.stop();inputError='input action queue exceeded';return;}
+    if(pendingActions>=8){inputPaused=true;stopFilter();inputError='input action queue exceeded';return;}
     pendingActions++;
-    actionQueue=actionQueue.then(function(){return runActions(actions);}).catch(function(e){inputError=e.message;inputPaused=true;physical.stop();}).finally(function(){pendingActions--;});
-});
+    actionQueue=actionQueue.then(function(){return runActions(actions);}).catch(function(e){inputError=e.message;inputPaused=true;stopFilter();}).finally(function(){pendingActions--;});
+}
+var physical=new PhysicalInput(agentExecute,physicalEvent);
+// The remote reaches the TV as separate devices (IR "rc device", Bluetooth "Smart Control"). The saved device
+// leads; every other selectable remote is intercepted alongside it with the same keys.
+var filterExtras=[], filterGeneration=0;
+function stopFilter(){++filterGeneration;filterExtras.forEach(function(x){x.bridge.stop();});filterExtras=[];physical.stop();}
+function startExtra(x,tokens){x.starting=true;return x.bridge.start(x.node,'filter',tokens).catch(function(e){return {error:e.message};}).then(function(r){x.starting=false;return r;});}
+function startFilter(device,tokens){
+    var generation=filterGeneration;
+    return physical.start(device,'filter',tokens).then(function(status){
+        return physical.inventory().then(function(list){
+            if(generation!==filterGeneration)return;
+            filterExtras=list.filter(function(d){return d.selectable&&d.node!==status.policy.node;}).map(function(d){return {node:d.node,bridge:new PhysicalInput(agentExecute,physicalEvent),starting:false};});
+            return Promise.all(filterExtras.map(function(x){return startExtra(x,tokens);}));
+        }).then(function(){return status;});
+    });
+}
 var inputObservers=[], inputPaused=false, inputRestoring=false;
 function inputPreference(){var p=remapStore.input;return p&&p.enabled===true&&typeof p.device==='string'?p:{enabled:false};}
 function saveInputPreference(preference){
@@ -529,7 +550,11 @@ function saveInputPreference(preference){
 function inputTokens(){return remapStore.rules.filter(function(r){return r.enabled&&r.trigger.type==='physical';}).map(function(r){return r.trigger.value;});}
 function restoreInput(){
     var preference=inputPreference();
-    if(!preference.enabled||inputPaused||inputRestoring||physical.status().policy.connected||!platform.status().agent.connected||!inputTokens().length)return;
+    if(!preference.enabled||inputPaused||inputRestoring||!platform.status().agent.connected||!inputTokens().length)return;
+    if(physical.status().policy.connected){
+        filterExtras.forEach(function(x){if(!x.starting&&!x.bridge.status().policy.connected)startExtra(x,inputTokens());});
+        return;
+    }
     inputRestoring=true;
     physical.inventory().then(function(list){
         if(inputPaused||inputPreference()!==preference)return;
@@ -538,16 +563,20 @@ function restoreInput(){
         // Several interfaces share the name: the one that advertises keys, and if more than one does, the saved node among them.
         var device=candidates.length===1?candidates[0]:keyed.length===1?keyed[0]:keyed.find(function(d){return d.node===preference.node;})||null;
         if(!device)throw new Error('Saved physical remote is unavailable');
-        return physical.start(device.node,'filter',inputTokens());
+        stopFilter();
+        return startFilter(device.node,inputTokens());
     }).then(function(){inputError=null;}).catch(function(e){inputError=e.message;}).finally(function(){inputRestoring=false;});
 }
-function stopInput(){inputObservers.forEach(function(b){b.stop();});inputObservers=[];physical.stop();}
+function stopInput(){inputObservers.forEach(function(b){b.stop();});inputObservers=[];stopFilter();}
 function inputSnapshot(){
-    if(!inputObservers.length)return Object.assign({},physical.status(),{preference:inputPreference()});
+    var bridges=inputObservers.length?inputObservers:[physical].concat(filterExtras.map(function(x){return x.bridge;}));
+    if(bridges.length===1)return Object.assign({},physical.status(),{preference:inputPreference()});
     var events=[],connected=false,errors=[];
-    inputObservers.forEach(function(b){var s=b.status();events=events.concat(s.events);connected=connected||s.policy.connected;if(s.error)errors.push(s.error);});
+    bridges.forEach(function(b){var s=b.status();events=events.concat(s.events);connected=connected||s.policy.connected;if(s.error)errors.push(s.error);});
     events.sort(function(a,b){return a.time_seconds-b.time_seconds||a.time_microseconds-b.time_microseconds;});
-    return {policy:{mode:'observe',device:'auto',connected:connected},preference:inputPreference(),events:events.slice(-30),error:errors.join('; ')||null};
+    var policy=inputObservers.length?{mode:'observe',device:'auto',connected:connected}
+        :Object.assign({},physical.status().policy,{device:bridges.map(function(b){return b.status().policy.device;}).filter(Boolean).join(' + ')});
+    return {policy:policy,preference:inputPreference(),events:events.slice(-30),error:errors.join('; ')||null};
 }
 function handleInput(req,res){
     if(req.method==='GET')return physical.inventory().then(function(list){serveJson(res,{devices:list,status:inputSnapshot(),error:inputError});}).catch(function(e){serveJson(res,{devices:[],status:inputSnapshot(),error:e.message});});
@@ -569,10 +598,10 @@ function handleInput(req,res){
         }
         if(p.device==='auto')return serveJson(res,{error:'select the detected node before intercepting'},400);
         stopInput();
-        physical.start(p.device,p.mode,tokens).then(function(status){
+        (p.mode==='filter'?startFilter(p.device,tokens):physical.start(p.device,p.mode,tokens)).then(function(status){
             if(p.mode==='filter'){saveInputPreference({enabled:true,device:status.policy.device,node:status.policy.node});inputPaused=false;}
             serveJson(res,{ok:true,persisted:p.mode==='filter',status:inputSnapshot()});
-        }).catch(function(e){physical.stop();serveJson(res,{ok:false,error:e.message},503);});
+        }).catch(function(e){stopFilter();serveJson(res,{ok:false,error:e.message},503);});
     });
 }
 function handleRemapRun(req,res){readJsonBody(req,res,function(p){

@@ -12,6 +12,8 @@ var TRIGGER_TYPES = ['physical', 'key', 'mqtt', 'http'];
 
 function validateAction(a) {
     if (!a || typeof a !== 'object') throw new Error('invalid action');
+    // Blocks the trigger and does nothing else, e.g. to disable a remote key.
+    if (a.type === 'none') return {type: 'none'};
     if (a.type === 'key') {
         if (typeof a.key !== 'string' || !KEY_RE.test(a.key)) throw new Error('invalid key: ' + a.key);
         return {type: 'key', key: a.key};
