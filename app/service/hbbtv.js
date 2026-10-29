@@ -11,6 +11,12 @@ var execError = require('./exec-error.js');
 // Off therefore means: menu value 19, the brake file, the service stopped and the app stopped. The service and the
 // brake file live in tmpfs / the running system, so they are put back after each boot (see enforce and quick-wins.js).
 // Off never starts anything. On removes both flag files and starts the service and the app.
+//
+// S90C (Tizen 9, 2026-10-25): there is no hbbtv_service. The relauncher is the libhbbtv-daemon.so plugin of
+// common-daemon-basic-monitor, which also hosts the TV timers, so it cannot be stopped. It ignores the brake file
+// when it relaunches a terminated app, but it skips every launch while /tmp/hbbtv_app_running exists. Off
+// therefore also leaves that file behind owned by root and read-only: the app (owner) cannot remove it from the
+// sticky /tmp. On removes it again.
 var fs=require('fs'),KEY='db/menu/system/data-service',FILE='/opt/usr/home/owner/share/vetro-hbbtv.json';
 var APP='org.tizen.hbbtv',SERVICE='org.tizen.hbbtv-service',FLAG='/tmp/hbbtv_do-not-relaunch',RUNFLAG='/tmp/hbbtv_app_running';
 function listed(id){return 'app_launcher -S 2>/dev/null | grep -q "^[[:space:]]*'+id.replace(/\./g,'\\.')+'[[:space:]]"';}
@@ -18,6 +24,8 @@ function listed(id){return 'app_launcher -S 2>/dev/null | grep -q "^[[:space:]]*
 // moment to leave the list: wait up to 5 s.
 function stopOf(id){return 'if '+listed(id)+'; then app_launcher -t '+id+' || true; i=0; while '+listed(id)+' && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done; fi';}
 var STOP=stopOf(SERVICE)+'\n'+stopOf(APP);
+var LOCK='rm -f '+RUNFLAG+'; touch '+RUNFLAG+'; chmod 444 '+RUNFLAG;
+var UNLOCK='if [ "$(stat -c %u '+RUNFLAG+' 2>/dev/null)" = 0 ]; then rm -f '+RUNFLAG+'; fi';
 function wrap(s){return 'echo '+Buffer.from(s).toString('base64')+' | base64 -d | sh';}
 function check(r){if(r.exit_code||r.timed_out)throw execError.failed(r,r.stderr||r.stdout||'HbbTV unavailable');return r.stdout||'';}
 function Control(execute,storage){this.execute=execute;this.fs=storage||fs;this.busy=false;}
@@ -30,10 +38,10 @@ Control.prototype.read=function(){var self=this;
   return {value:v,off:valueOff&&flag&&!running&&!service,valueOff:valueOff,flag:flag,running:running,serviceRunning:service,restoreValue:saved,canRestore:saved!==null,source:KEY,verification:'Menu value, brake file and process list; the red button must be checked on the TV'};});};
 Control.prototype.change=function(off,expected){var self=this;if(typeof off!=='boolean'||!Number.isInteger(expected))return Promise.reject(Error('Invalid HbbTV state'));if(this.busy)return Promise.reject(Error('HbbTV change already in progress'));this.busy=true;var previous;
  function apply(script){return self.execute(wrap('set -e\n'+script+'\nsleep 1'),25000).then(check);}
- function disable(){return apply('vconftool set -f -t int '+KEY+' 19\ntouch '+FLAG+'\n'+STOP);}
+ function disable(){return apply('vconftool set -f -t int '+KEY+' 19\ntouch '+FLAG+'\n'+LOCK+'\n'+STOP);}
  function enable(value){return apply('vconftool set -f -t int '+KEY+' '+value+'\nrm -f '+FLAG+' '+RUNFLAG+'\napp_launcher -s '+SERVICE+'\nsleep 1\napp_launcher -s '+APP);}
  // Back to what was there: the menu value, the brake file as it was, the service started again if it was running.
- function putBack(s){return apply('vconftool set -f -t int '+KEY+' '+s.value+'\n'+(s.flag?'touch '+FLAG:'rm -f '+FLAG)+(s.serviceRunning?'\nif ! '+listed(SERVICE)+'; then app_launcher -s '+SERVICE+'; fi':''));}
+ function putBack(s){return apply('vconftool set -f -t int '+KEY+' '+s.value+'\n'+(s.off?LOCK:UNLOCK)+'\n'+(s.flag?'touch '+FLAG:'rm -f '+FLAG)+(s.serviceRunning?'\nif ! '+listed(SERVICE)+'; then app_launcher -s '+SERVICE+'; fi':''));}
  function why(a){return a.running?'the app is still running':a.serviceRunning?'its service is still running':a.flag?'the menu value was not kept':'the brake file was not kept';}
  return this.read().then(function(s){if(s.value!==expected)throw Error('Value changed; refresh before editing');previous=s;
   if(off){if(s.off)return Object.assign(s,{changed:false});
@@ -52,5 +60,5 @@ Control.prototype.change=function(off,expected){var self=this;if(typeof off!=='b
 Control.prototype.enforce=function(){var self=this;
  return this.read().then(function(s){if(!s.valueOff)return {stopped:false,reason:'HbbTV is on in the menu'};
   if(s.flag&&!s.running&&!s.serviceRunning)return {stopped:false,reason:'already off'};
-  return self.execute(wrap('touch '+FLAG+'\n'+STOP+'\nsleep 1\ntrue'),25000).then(check).then(function(){return {stopped:true};});});};
-module.exports={Control:Control,KEY:KEY,FILE:FILE,FLAG:FLAG,STOP:STOP,SERVICE:SERVICE};
+  return self.execute(wrap('touch '+FLAG+'\n'+LOCK+'\n'+STOP+'\nsleep 1\ntrue'),25000).then(check).then(function(){return {stopped:true};});});};
+module.exports={Control:Control,KEY:KEY,FILE:FILE,FLAG:FLAG,STOP:STOP,LOCK:LOCK,SERVICE:SERVICE};

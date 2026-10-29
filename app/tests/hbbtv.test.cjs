@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('assert').strict,{Control,FLAG,SERVICE}=require('../service/hbbtv.js');
+const assert=require('assert').strict,{Control,FLAG,LOCK,SERVICE}=require('../service/hbbtv.js');
 // A small TV: the menu value, the brake file in /tmp, whether hbbtv_app and hbbtv_service run. Scripts are read, not run.
 // Like the real one, it starts HbbTV again when the app dies while the service is running (the brake file does not stop that).
 function tv(start){
@@ -8,7 +8,7 @@ function tv(start){
   if(sh.includes('__FLAG__'))return {exit_code:0,stdout:'value = '+s.value+' (Int32)\n__FLAG__\n'+(s.flag?1:0)+'\n__RUN__\n'+(s.running?1:0)+'\n__SVC__\n'+(s.service?1:0)+'\n'};
   if(s.fail&&s.fail(sh))return {exit_code:1,stdout:'',stderr:'boom'};
   const set=/vconftool set -f -t int \S+ (-?\d+)/.exec(sh);if(set)s.value=Number(set[1]);
-  if(sh.includes('touch '+FLAG))s.flag=true;if(/rm -f /.test(sh)&&sh.includes(FLAG))s.flag=false;
+  if(sh.includes('touch '+FLAG))s.flag=true;if(sh.includes('rm -f '+FLAG))s.flag=false;
   // order inside the script matters: stop the service first, then the app
   sh.split('\n').forEach(line=>{
    if(line.startsWith('if app_launcher -S')&&line.includes('org\\.tizen\\.hbbtv-service')&&line.includes('-t org.tizen.hbbtv-service'))s.service=false;
@@ -29,6 +29,7 @@ function tv(start){
  // The service goes first: the script stops it before it touches the app.
  r=await c.change(true,19);assert.equal(r.changed,true);assert.equal(r.off,true);assert.equal(t.s.flag,true);assert.equal(t.s.running,false);assert.equal(t.s.service,false);assert.equal(t.s.appStarts+t.s.svcStarts,0,'off never starts anything');
  const off=t.scripts.find(s=>s.includes('touch '+FLAG));assert.ok(off.indexOf('-t org.tizen.hbbtv-service')>0&&off.indexOf('-t org.tizen.hbbtv-service')<off.indexOf('-t org.tizen.hbbtv '),'service is stopped before the app');
+ assert.ok(off.includes(LOCK)&&off.indexOf(LOCK)<off.indexOf('-t org.tizen.hbbtv '),'S90C: the read-only running file is in place before the app stops, so the monitor does not relaunch it');
  assert.ok(t.scripts.every(s=>!/app_launcher -s/.test(s)),'no script on the way off starts anything');
  assert.equal((await c.change(true,19)).changed,false,'already off: nothing to do');
  // Turning off from On saves the value, writes 19 and restores it exactly; on starts the service and the app and drops both files.
@@ -42,7 +43,7 @@ function tv(start){
  t=tv({value:20,running:true,service:true});backup=null;const exec=t.execute;
  const stubborn=async cmd=>{const out=await exec(cmd);const sh=Buffer.from(cmd.split(' ')[1],'base64').toString();if(sh.includes('-t org.tizen.hbbtv '))t.s.running=true;return out;};
  c=new Control(stubborn,io);
- await assert.rejects(c.change(true,20),/still running.*previous state restored/);assert.equal(t.s.value,20);assert.equal(t.s.flag,false);assert.equal(t.s.service,true,'the service is back if the attempt failed');
+ await assert.rejects(c.change(true,20),/still running.*previous state restored/);assert.equal(t.s.value,20);assert.equal(t.s.flag,false);assert.equal(t.s.service,true,'the service is back if the attempt failed');assert.ok(t.scripts.at(-2).includes('stat -c %u /tmp/hbbtv_app_running'),'a failed attempt drops the root-owned running file again');
  // After a boot the firmware has started both again and the brake file is gone: enforce puts the choice back.
  t=tv({value:19,flag:false,running:true,service:true});c=new Control(t.execute,io);
  assert.deepEqual(await c.enforce(),{stopped:true});assert.equal(t.s.flag,true);assert.equal(t.s.running,false);assert.equal(t.s.service,false);
