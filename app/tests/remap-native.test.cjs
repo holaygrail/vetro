@@ -11,5 +11,7 @@ function post(url,body){return new Promise(resolve=>{const req=new EventEmitter(
  assert.equal(result.data.transport,'native');assert.equal(result.data.sent,2);
  assert.deepEqual(commands,['/usr/bin/app_launcher -s app.selected','/usr/bin/input_keyevent Return']);
  assert.equal((await post('/remap',{rules:[{...rule,trigger:{type:'physical',value:'768'}}]})).status,400);
- console.log('PASS native remap: canonical physical codes, selected app and whitelisted native key');
+ commands.length=0;assert.equal((await post('/remap',{rules:[{id:'pmode',trigger:{type:'physical',value:'226'},actions:[{type:'key',key:'KEY_PMODE'}]}]})).status,200);
+ assert.equal((await post('/remap/run',{type:'physical',value:'226'})).data.sent,1);assert.deepEqual(commands,['/usr/bin/input_keyevent XF86PictureMode'],'KEY_PMODE sends the picture mode key');
+ console.log('PASS native remap: canonical physical codes, selected app, whitelisted native key and picture mode');
 })().catch(e=>{console.error(e);process.exitCode=1});
