@@ -19,6 +19,9 @@ async function main() {
   const commands=require('../service/debloat-commands.js');
   assert.throws(() => commands.disableCommand(['com.samsung.tv.coba.adagent.service']),/Smart Hub/);
   assert.ok(commands.enableCommand(['com.samsung.tv.coba.adagent']));
-  console.log('PASS platform adapter: installer cleanup, unknown outcome, lifecycle and Smart Hub protection');
+  const detach=provider.detachCommand(4277);
+  assert.match(detach,/echo 4277 > \/sys\/fs\/cgroup\/\$h\/vetro\/cgroup\.procs/);assert.match(detach,/for h in systemd unified/);
+  for (const bad of [0,'',null,undefined,'12;reboot','-1',12.5]) assert.equal(provider.detachCommand(bad),null);
+  console.log('PASS platform adapter: installer cleanup, unknown outcome, lifecycle, Smart Hub protection and agent cgroup detach');
 }
 main().catch(error => {console.error(error);process.exitCode=1;});

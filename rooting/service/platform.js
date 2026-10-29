@@ -174,6 +174,7 @@ function startAgent() {
             };
             pushAttempt({ t: Date.now(), phase: 'agent-connected', output: 'uid=' + conn.identity.uid + ' cap=' + conn.identity.cap_eff });
             persist();
+            detachAgent(conn.identity.pid);
             // The agent has detached; release any remaining launch connection.
             if (launchClient) { try { sdb.close(launchClient); } catch (e) {} launchClient = null; }
         },
@@ -274,6 +275,25 @@ function persist() {
     try { fs.appendFileSync('/tmp/vetro.jsonl', JSON.stringify(state) + '\n'); } catch (e) {}
 }
 
+// The agent is launched through the local sdbd, so it lives in sdbd.service's cgroup. On the S90C sdbd restarts
+// when the TV wakes from standby and systemd kills that whole cgroup: root and the remote helpers are gone for
+// ~10 s after every power-on. A cgroup of its own (both hierarchies; helpers inherit it) keeps them alive.
+function detachCommand(pid) {
+    if (!/^[1-9][0-9]{0,9}$/.test(String(pid))) return null;
+    return 'for h in systemd unified; do [ -d /sys/fs/cgroup/$h ] || continue; mkdir -p /sys/fs/cgroup/$h/vetro && echo ' +
+        pid + ' > /sys/fs/cgroup/$h/vetro/cgroup.procs; done; grep -E "name=systemd|^0::" /proc/' + pid + '/cgroup';
+}
+function detachAgent(pid) {
+    var command = detachCommand(pid);
+    if (!command) return;
+    agentExecute(command, 10000).then(function (r) {
+        pushAttempt({ t: Date.now(), phase: 'agent-detached', output: String(r.stdout || r.stderr || '').trim() });
+        persist();
+    }).catch(function (e) {
+        pushAttempt({ t: Date.now(), phase: 'agent-detach-failed', output: String(e.message || e) });
+    });
+}
+
 function agentExecute(cmd, timeoutMs) {
     if (!agentServer || !agentConnected) {
         var missing = new Error('no root agent connected');
@@ -320,4 +340,4 @@ function setApplicationsEnabled(appIds, enabled) {
     } catch (error) { return Promise.reject(error); }
 }
 module.exports = {start: startAgent, stop: stop, status: status, execute: agentExecute,
-    install: install, setApplicationsEnabled: setApplicationsEnabled};
+    install: install, setApplicationsEnabled: setApplicationsEnabled, detachCommand: detachCommand};
