@@ -2,7 +2,7 @@
 const assert=require('assert').strict, path=require('path'), EventEmitter=require('events');
 const load=require('./service-harness.cjs'), root=path.resolve(__dirname,'..');
 let disk=JSON.stringify({rules:[{id:'netflix',enabled:true,trigger:{type:'physical',value:'226'},actions:[{type:'launch',appId:'plex.app'}]},{id:'mute',enabled:true,trigger:{type:'physical',value:'113'},actions:[{type:'none'}]}],input:{enabled:true,device:'wt61p807 rc device',node:'/dev/input/event1'}});
-const remotes=[{name:'wt61p807 rc device',node:'/dev/input/event1',unique:true,selectable:true},{name:'Smart Control',node:'/dev/input/event3',unique:true,selectable:true},{name:'wt61p807 panel key device',node:'/dev/input/event2',unique:true,selectable:false}];
+const remotes=[{name:'sdp-mcirb',node:'/dev/input/event0',unique:true,selectable:true},{name:'wt61p807 rc device',node:'/dev/input/event1',unique:true,selectable:true},{name:'Smart Control',node:'/dev/input/event3',unique:true,selectable:true},{name:'wt61p807 panel key device',node:'/dev/input/event2',unique:true,selectable:false}];
 const bridges=[], commands=[];
 class Bridge {
  constructor(execute,onEvent){this.onEvent=onEvent;this.current={mode:'off',connected:false};bridges.push(this);}
@@ -17,7 +17,7 @@ const launches=()=>commands.filter(c=>c.startsWith('/usr/bin/app_launcher'));
 const active=()=>bridges.filter(b=>b.current.mode==='filter').map(b=>b.current.node).sort();
 (async()=>{
  const service=await boot();await service.tick();
- assert.deepEqual(active(),['/dev/input/event1','/dev/input/event3'],'saved remote and Bluetooth remote are both intercepted, the panel is not');
+ assert.deepEqual(active(),['/dev/input/event1','/dev/input/event3'],'saved remote and Bluetooth remote are both intercepted, the panel and the SoC IR receiver are not');
  assert.ok(bridges.every(b=>b.current.mode!=='filter'||b.current.blocked.join()==='226,113'));
  const status=(await get(service)).status;assert.equal(status.policy.mode,'filter');assert.equal(status.policy.node,'/dev/input/event1');
  assert.equal(status.policy.device,'wt61p807 rc device + Smart Control');

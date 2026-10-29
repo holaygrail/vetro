@@ -527,7 +527,8 @@ function physicalEvent(event){
 }
 var physical=new PhysicalInput(agentExecute,physicalEvent);
 // The remote reaches the TV as separate devices (IR "rc device", Bluetooth "Smart Control"). The saved device
-// leads; every other selectable remote is intercepted alongside it with the same keys.
+// leads; every other selectable remote is intercepted alongside it with the same keys. The SoC IR receiver
+// "sdp-mcirb" is skipped: its key map is empty (rc-empty), so it never reports remote keys.
 var filterExtras=[], filterGeneration=0;
 function stopFilter(){++filterGeneration;filterExtras.forEach(function(x){x.bridge.stop();});filterExtras=[];physical.stop();}
 function startExtra(x,tokens){x.starting=true;return x.bridge.start(x.node,'filter',tokens).catch(function(e){return {error:e.message};}).then(function(r){x.starting=false;return r;});}
@@ -536,7 +537,7 @@ function startFilter(device,tokens){
     return physical.start(device,'filter',tokens).then(function(status){
         return physical.inventory().then(function(list){
             if(generation!==filterGeneration)return;
-            filterExtras=list.filter(function(d){return d.selectable&&d.node!==status.policy.node;}).map(function(d){return {node:d.node,bridge:new PhysicalInput(agentExecute,physicalEvent),starting:false};});
+            filterExtras=list.filter(function(d){return d.selectable&&d.node!==status.policy.node&&!/mcirb/i.test(d.name);}).map(function(d){return {node:d.node,bridge:new PhysicalInput(agentExecute,physicalEvent),starting:false};});
             return Promise.all(filterExtras.map(function(x){return startExtra(x,tokens);}));
         }).then(function(){return status;});
     });
