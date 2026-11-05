@@ -6,7 +6,9 @@ var INTROSPECT_XML='busctl --system --xml-interface introspect org.tizen.tv.avoc
 var INTROSPECT_TABLE='busctl --system introspect org.tizen.tv.avoc /org/tizen/tv/avoc '+INTERFACE+' 2>/dev/null; true';
 var PREFIX='busctl --system call org.tizen.tv.avoc /org/tizen/tv/avoc org.tizen.tv.avoc.AvOutputControl ';
 var ITEMS=[
- {id:'backlight',label:'Panel brightness',group:'picture',get:'GetBacklight',args:'i 0',set:'SetBacklight',signature:'ii',min:0,max:50},
+ // SetBacklight's second argument must be 1: with 0 avocd applies the value and puts the stored one back within
+// half a second (S90C, Tizen 9, light sensor on), so the readback right after the write still passed.
+ {id:'backlight',label:'Panel brightness',group:'picture',get:'GetBacklight',args:'i 0',set:'SetBacklight',signature:'ii',setArg:1,settle:1000,min:0,max:50},
  {id:'contrast',label:'Contrast',group:'picture',get:'GetContrast',args:'i 0',set:'SetContrast',signature:'yi',min:0,max:50},
  {id:'sharpness',label:'Sharpness',group:'picture',get:'GetSharpness',args:'i 0',set:'SetSharpness',signature:'yi',min:0,max:20},
  {id:'color',label:'Color',group:'picture',get:'GetColorStrength',args:'i 0',set:'SetColorStrength',signature:'yi',min:0,max:50},
@@ -61,8 +63,9 @@ Store.prototype.write=function(p){var self=this,x=ITEMS.find(function(x){return 
  if(!Number.isInteger(p.value)||p.value<x.min||p.value>x.max||!Number.isInteger(p.expected))return Promise.reject(Error('Invalid value'));
  if(this.busy)return Promise.reject(Error('Change already in progress'));this.busy=true;
  function get(){return self.execute(PREFIX+x.get+' '+x.args,5000).then(function(r){return decode(check(r));});}
- function set(v){return self.execute(PREFIX+x.set+' '+x.signature+' '+v+(x.signature.length>1?' 0':''),5000).then(function(r){if(!/^i 0\s*$/.test(check(r)))throw Error('TV rejected the change');});}
- return get().then(function(before){if(before!==p.expected)throw Error('TV value changed; refresh before saving');return set(p.value).then(get).then(function(after){if(after!==p.value)throw Error('Readback does not match');return {ok:true,verified:true,id:x.id,previous:before,value:after};}).catch(function(e){return set(before).then(get).then(function(restored){e.message+=' · restore '+(restored===before?'confirmed':'not confirmed');throw e;},function(){throw Error(e.message+' · restore not confirmed');});});}).finally(function(){self.cached=null;self.busy=false;});
+ function set(v){return self.execute(PREFIX+x.set+' '+x.signature+' '+v+(x.signature.length>1?' '+(x.setArg||0):''),5000).then(function(r){if(!/^i 0\s*$/.test(check(r)))throw Error('TV rejected the change');});}
+ function settle(){return new Promise(function(r){setTimeout(r,x.settle||0);});}
+ return get().then(function(before){if(before!==p.expected)throw Error('TV value changed; refresh before saving');return set(p.value).then(settle).then(get).then(function(after){if(after!==p.value)throw Error('Readback does not match');return {ok:true,verified:true,id:x.id,previous:before,value:after};}).catch(function(e){return set(before).then(get).then(function(restored){e.message+=' · restore '+(restored===before?'confirmed':'not confirmed');throw e;},function(){throw Error(e.message+' · restore not confirmed');});});}).finally(function(){self.cached=null;self.busy=false;});
 };
 // One value, for MQTT state publishing: a single D-Bus call instead of the full settings read.
 Store.prototype.readOne=function(id){var x=ITEMS.find(function(x){return x.id===id});if(!x)return Promise.reject(Error('Unknown setting'));return this.execute(PREFIX+x.get+' '+x.args,5000).then(function(r){return decode(check(r));});};

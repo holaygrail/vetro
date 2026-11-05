@@ -46,3 +46,8 @@ assert.equal(decode('yi 45 0\n'),45);assert.throws(()=>decode('ii 4 -1'),/unavai
  const fresh=new Store(async()=>({stdout:'',exit_code:0}));await assert.rejects(fresh.write({id:'ledClearMotion',value:1,expected:0}),/not confirmed/);
  console.log('PASS TV settings: firmware-derived controls are written only after this TV confirms the exact D-Bus signature');
 })().catch(e=>{console.error(e);process.exitCode=1});
+// Brightness: written with the keep argument and read back after it settles, so a value the TV puts back is caught.
+(async()=>{const {Store}=require('../service/tv-settings.js');let v=10,sets=[];
+ const ex=async c=>{if(/GetBacklight/.test(c))return {exit_code:0,stdout:'ii '+v+' 0\n'};const m=/SetBacklight ii (\d+) (\d)/.exec(c);if(m){sets.push(m[2]);v=+m[1];if(m[2]==='0')setTimeout(()=>{v=10},200);return {exit_code:0,stdout:'i 0\n'};}return {exit_code:0,stdout:''};};
+ const d=await new Store(ex).writeLatest('backlight',15);require('assert').strict.equal(d.value,15);require('assert').strict.deepEqual(sets,['1']);
+ console.log('PASS brightness write: keep argument, settled readback');})().catch(e=>{console.error(e);process.exitCode=1});
