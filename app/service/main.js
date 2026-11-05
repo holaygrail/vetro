@@ -697,15 +697,18 @@ var inputRestoreTimer=setInterval(restoreInput,5000);if(inputRestoreTimer.unref)
 // MQTT bridge: publishes telemetry + Home Assistant discovery when a broker
 // is configured (persistent owner config, /tmp fallback). No-op without config.
 var mqttLastTrigger=Object.create(null);
-// Panel brightness from MQTT: the newest value wins while a write is running.
-var backlightBusy=false,backlightNext=null;
+// Panel brightness from MQTT. The requested value is echoed as the state at once, so Home Assistant's slider
+// does not wait for the write and its settled readback (1-2 s) and later reports cannot pull it back. While a
+// write runs only the newest value waits; the readback is published only when the TV ends somewhere else.
+var backlightBusy=false,backlightNext=null,backlightWanted=null,backlightAt=0,BACKLIGHT_QUIET=5000;
 function setBacklight(payload){
  var text=String(payload).trim(),value=/^\d{1,2}(\.0+)?$/.test(text)?Math.round(+text):NaN;
  if(!(value>=0&&value<=50)){bridge.event('error','Panel brightness: invalid value');return;}
+ backlightWanted=value;backlightAt=Date.now();try{bridge.publishBacklight(value);}catch(e){}
  backlightNext=value;if(backlightBusy)return;backlightBusy=true;
  (function next(){var v=backlightNext;backlightNext=null;
   tvSettings.writeLatest('backlight',v).then(function(d){bridge.event('trigger','Panel brightness '+d.previous+' → '+d.value+' read back');return d.value;},function(e){bridge.event('error','Panel brightness: '+e.message);return tvSettings.readOne('backlight').catch(function(){return null;});})
-   .then(function(v){try{bridge.publishBacklight(v);}catch(e){}if(backlightNext!==null)return next();backlightBusy=false;});
+   .then(function(actual){if(backlightNext!==null)return next();backlightBusy=false;backlightAt=Date.now();if(actual!==backlightWanted)try{bridge.publishBacklight(actual);}catch(e){}});
  })();
 }
 var bridge = new MqttBridge(readTelemetry,function(m){
@@ -732,7 +735,7 @@ var presenceTimer=setInterval(function(){
 var tvStateTimer=setInterval(function(){
  if(!bridge.connected)return;
  tvState.read().then(function(d){bridge.publishTvState(d);}).catch(function(){bridge.publishTvState(null);});
- if(!backlightBusy)tvSettings.readOne('backlight').then(function(v){bridge.publishBacklight(v);},function(){bridge.publishBacklight(null);}).catch(function(){});
+ if(!backlightBusy&&Date.now()-backlightAt>BACKLIGHT_QUIET)tvSettings.readOne('backlight').then(function(v){bridge.publishBacklight(v);},function(){bridge.publishBacklight(null);}).catch(function(){});
 },10000);if(tvStateTimer.unref)tvStateTimer.unref();
 
 // Restore only an explicitly saved local domain filter once the adapter is ready.
