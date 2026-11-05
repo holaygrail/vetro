@@ -15,6 +15,7 @@ var buildInfo = require('./build-info.js');
 var apps = require('./apps.js');
 var probe = require('./probe.js');
 var remap = require('./remap.js');
+var channel = require('./channel.js');
 var settings = require('./settings.js');
 var TVSettings = require('./tv-settings.js').Store;
 var AppRegistry = require('./app-registry.js');
@@ -508,6 +509,7 @@ function runActions(actions) {
         if(a.type==='none')return;
         if(a.type==='mqtt'){bridge.publish(a.topic,a.payload);sent++;mqttSent++;return;}
         if(a.type==='launch')command='/usr/bin/app_launcher -s '+a.appId;
+        else if(a.type==='channel'){command=channel.tuneCommand(a.number);if(!command)throw new Error('invalid channel number');}
         else if(a.type==='key'){var key=control.nativeKey(a.key);command=key&&control.injectCommand(key);if(!command)throw new Error('unsupported native key: '+a.key);}
         else {skipped.push(a.type);return;}
         return agentExecute(command,10000).then(function(r){if(r.exit_code||r.timed_out)throw new Error(r.stderr||'native action failed');sent++;});

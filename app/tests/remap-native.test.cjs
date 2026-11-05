@@ -15,5 +15,10 @@ function post(url,body){return new Promise(resolve=>{const req=new EventEmitter(
  assert.equal((await post('/remap/run',{type:'physical',value:'226'})).data.sent,1);assert.deepEqual(commands,['/usr/bin/input_keyevent XF86PictureMode'],'KEY_PMODE sends the picture mode key');
  commands.length=0;assert.equal((await post('/remap',{rules:[{id:'livetv',trigger:{type:'physical',value:'226'},actions:[{type:'key',key:'KEY_TV'}]}]})).status,200);
  assert.equal((await post('/remap/run',{type:'physical',value:'226'})).data.sent,1);assert.deepEqual(commands,['/usr/bin/input_keyevent XF86DiscretSourceTV'],'KEY_TV switches to live TV');
- console.log('PASS native remap: canonical physical codes, selected app, whitelisted native key, picture mode and live TV');
+ commands.length=0;const saved=await post('/remap',{rules:[{id:'ch',trigger:{type:'physical',value:'626'},actions:[{type:'channel',number:'104'}]}]});assert.equal(saved.status,200);assert.deepEqual(saved.data.rules[0].actions,[{type:'channel',number:104}],'channel number is stored as an integer');
+ assert.equal((await post('/remap/run',{type:'physical',value:'626'})).data.sent,1);assert.equal(commands.length,1);
+ assert.match(commands[0],/sqlite3 -readonly "\$p" "select srvId from SRV where major=104 and hidden=0 order by minor limit 1"/,'service ID is read from the channel database at press time');
+ assert.match(commands[0],/\/usr\/bin\/launch_app org\.tizen\.tv-viewer svcid "\$id"$/,'tv-viewer tunes the service');
+ for(const bad of [0,10000,'1;reboot',1.5,null])assert.equal((await post('/remap',{rules:[{id:'ch',trigger:{type:'physical',value:'626'},actions:[{type:'channel',number:bad}]}]})).status,400,'rejects channel '+bad);
+ console.log('PASS native remap: canonical physical codes, selected app, whitelisted native key, picture mode, live TV key and direct channel tuning');
 })().catch(e=>{console.error(e);process.exitCode=1});

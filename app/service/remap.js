@@ -3,6 +3,8 @@
 // Rules map physical evdev codes, foreground widget keys, or HTTP/MQTT triggers
 // to native key injection and app launch through the platform adapter.
 
+var channel = require('./channel.js');
+
 var MAX_RULES = 50;
 var MAX_ACTIONS = 10;
 var KEY_RE = /^KEY_[A-Z0-9_]{1,30}$/;
@@ -21,6 +23,11 @@ function validateAction(a) {
     if (a.type === 'launch') {
         if (typeof a.appId !== 'string' || !APP_RE.test(a.appId)) throw new Error('invalid appId');
         return {type: 'launch', appId: a.appId};
+    }
+    if (a.type === 'channel') {
+        var n = typeof a.number === 'string' && /^\d{1,4}$/.test(a.number) ? +a.number : a.number;
+        if (!channel.valid(n)) throw new Error('invalid channel number');
+        return {type: 'channel', number: n};
     }
     if (a.type === 'mqtt') {
         if (typeof a.topic !== 'string' || !TOPIC_RE.test(a.topic)) throw new Error('invalid topic');
