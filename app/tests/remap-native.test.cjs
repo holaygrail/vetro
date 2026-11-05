@@ -13,5 +13,7 @@ function post(url,body){return new Promise(resolve=>{const req=new EventEmitter(
  assert.equal((await post('/remap',{rules:[{...rule,trigger:{type:'physical',value:'768'}}]})).status,400);
  commands.length=0;assert.equal((await post('/remap',{rules:[{id:'pmode',trigger:{type:'physical',value:'226'},actions:[{type:'key',key:'KEY_PMODE'}]}]})).status,200);
  assert.equal((await post('/remap/run',{type:'physical',value:'226'})).data.sent,1);assert.deepEqual(commands,['/usr/bin/input_keyevent XF86PictureMode'],'KEY_PMODE sends the picture mode key');
- console.log('PASS native remap: canonical physical codes, selected app, whitelisted native key and picture mode');
+ commands.length=0;assert.equal((await post('/remap',{rules:[{id:'livetv',trigger:{type:'physical',value:'226'},actions:[{type:'key',key:'KEY_TV'}]}]})).status,200);
+ assert.equal((await post('/remap/run',{type:'physical',value:'226'})).data.sent,1);assert.deepEqual(commands,['/usr/bin/input_keyevent XF86DiscretSourceTV'],'KEY_TV switches to live TV');
+ console.log('PASS native remap: canonical physical codes, selected app, whitelisted native key, picture mode and live TV');
 })().catch(e=>{console.error(e);process.exitCode=1});
