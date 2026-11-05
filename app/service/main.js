@@ -300,7 +300,7 @@ function handleControl(req, res) {
 
 function handleMqttConfig(req,res){
  var mod=require('./mqtt-bridge.js');
- if(req.method==='GET')return serveJson(res,{config:mod.publicConfig(mod.readConfig()),status:bridge.status(),connected:bridge.connected});
+ if(req.method==='GET')return serveJson(res,{config:mod.publicConfig(mod.readConfig()),status:bridge.status(),connected:bridge.connected,backlight:backlight.status()});
  readJsonBody(req,res,function(p){var cfg;try{cfg=mod.validateConfig(p,mod.readConfig());}catch(e){return serveJson(res,{ok:false,error:e.message},400);}
   try{mod.saveConfig(cfg);}catch(e){return serveJson(res,{ok:false,error:'Configuration save failed'},500);}
   bridge.configure(cfg);serveJson(res,{ok:true,config:mod.publicConfig(cfg),status:bridge.status()});
@@ -697,27 +697,23 @@ var inputRestoreTimer=setInterval(restoreInput,5000);if(inputRestoreTimer.unref)
 // MQTT bridge: publishes telemetry + Home Assistant discovery when a broker
 // is configured (persistent owner config, /tmp fallback). No-op without config.
 var mqttLastTrigger=Object.create(null);
-// Panel brightness from MQTT. The requested value is echoed as the state at once, so Home Assistant's slider
-// does not wait for the write and its settled readback (1-2 s) and later reports cannot pull it back. While a
-// write runs only the newest value waits; the readback is published only when the TV ends somewhere else.
-var backlightBusy=false,backlightNext=null,backlightWanted=null,backlightAt=0,BACKLIGHT_QUIET=5000;
-function setBacklight(payload){
- var text=String(payload).trim(),value=/^\d{1,2}(\.0+)?$/.test(text)?Math.round(+text):NaN;
- if(!(value>=0&&value<=50)){bridge.event('error','Panel brightness: invalid value');return;}
- backlightWanted=value;backlightAt=Date.now();try{bridge.publishBacklight(value);}catch(e){}
- backlightNext=value;if(backlightBusy)return;backlightBusy=true;
- (function next(){var v=backlightNext;backlightNext=null;
-  tvSettings.writeLatest('backlight',v).then(function(d){bridge.event('trigger','Panel brightness '+d.previous+' → '+d.value+' read back');return d.value;},function(e){bridge.event('error','Panel brightness: '+e.message);return tvSettings.readOne('backlight').catch(function(){return null;});})
-   .then(function(actual){if(backlightNext!==null)return next();backlightBusy=false;backlightAt=Date.now();if(actual!==backlightWanted)try{bridge.publishBacklight(actual);}catch(e){}});
- })();
-}
 var bridge = new MqttBridge(readTelemetry,function(m){
- if(m.topic===bridge.backlightCommandTopic)return setBacklight(m.payload.toString('utf8'));
+ if(m.topic===bridge.backlightCommandTopic){backlight.request(m.payload.toString('utf8'));return;}
  var actions=remap.resolve(remapStore.rules,'mqtt',m.topic,m.payload.toString('utf8'));if(!actions.length)return;
  var now=Date.now();if(pendingActions>=8||now-(mqttLastTrigger[m.topic]||0)<500){bridge.event('throttled','Trigger rate limited: '+m.topic);return;}
  mqttLastTrigger[m.topic]=now;pendingActions++;
  actionQueue=actionQueue.then(function(){return runActions(actions);}).then(function(r){bridge.event('trigger','Rule executed: '+m.topic+' · '+r.sent+' action(s)');}).catch(function(e){bridge.event('error','MQTT rule: '+e.message);}).finally(function(){pendingActions--;});
 });
+// Panel brightness: event-driven sync (backlight-sync.js) while a broker connection is up; republished after
+// every (re)connect because discovery marks the slider unavailable until a value is known.
+var backlight=new (require('./backlight-sync.js').BacklightSync)({store:tvSettings,execute:agentExecute,
+ publish:function(v){bridge.publishBacklight(v);},event:function(t,m){bridge.event(t,m);}});
+var backlightSession=null;
+var backlightTimer=setInterval(function(){
+ if(!bridge.connected){if(backlight.running)backlight.stop();return;}
+ if(!backlight.running){backlightSession=bridge.connectedAt;backlight.start();}
+ else if(bridge.connectedAt!==backlightSession){backlightSession=bridge.connectedAt;backlight.refresh(true);}
+},1000);if(backlightTimer.unref)backlightTimer.unref();
 bridge.setTopics(remapStore.rules.filter(function(r){return r.enabled&&r.trigger.type==='mqtt'}).map(function(r){return r.trigger.value}));
 bridge.start();
 
@@ -735,7 +731,6 @@ var presenceTimer=setInterval(function(){
 var tvStateTimer=setInterval(function(){
  if(!bridge.connected)return;
  tvState.read().then(function(d){bridge.publishTvState(d);}).catch(function(){bridge.publishTvState(null);});
- if(!backlightBusy&&Date.now()-backlightAt>BACKLIGHT_QUIET)tvSettings.readOne('backlight').then(function(v){bridge.publishBacklight(v);},function(){bridge.publishBacklight(null);}).catch(function(){});
 },10000);if(tvStateTimer.unref)tvStateTimer.unref();
 
 // Restore only an explicitly saved local domain filter once the adapter is ready.
