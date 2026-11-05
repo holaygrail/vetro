@@ -44,6 +44,7 @@ function saveConfig(cfg){var temp=CONFIG_PATH_PERSISTENT+'.tmp';fs.writeFileSync
 function MqttBridge(getTelemetry,onMessage) {
     this.getTelemetry = getTelemetry;this.onMessage=onMessage||function(){};
     this.connected=false;this.state='disabled';this.topics=[];this.subscriptions=[];this.events=[];this.lastError=null;this.connectedAt=null;this.lastMessageAt=null;this.lastPublishAt=null;this.sent=0;this.received=0;this.retryAt=null;
+    this.controlTopics=[];this.backlightCommandTopic=null;
     this.client = null;
     this.config = null;
     this.timer = null;
@@ -138,7 +139,24 @@ MqttBridge.prototype._discover = function () {
         client.publish(topic,JSON.stringify(conf),{retain:true});client.discoveryTopics.push(topic);
     });
 
+    // Panel brightness (avoc SetBacklight, 0-50) as a slider. The service writes it with readback and publishes the
+    // value the TV reports; the entity is unavailable while the TV does not answer (deep standby).
+    var backlightTopic='homeassistant/number/'+client.identity+'/backlight/config';
+    client.publish(prefix+'/backlight/availability','offline',{retain:true});
+    client.publish(backlightTopic,JSON.stringify({name:'Panel brightness',icon:'mdi:brightness-6',state_topic:prefix+'/backlight',
+        command_topic:this.backlightCommandTopic,min:0,max:50,step:1,mode:'slider',unique_id:client.identity+'_backlight',device:device,
+        availability:[{topic:client.availabilityTopic},{topic:prefix+'/backlight/availability'}],availability_mode:'all',
+        payload_available:'online',payload_not_available:'offline'}),{retain:true});
+    client.discoveryTopics.push(backlightTopic);
+
     this.discovered = true;
+};
+
+MqttBridge.prototype.publishBacklight=function(value){
+    if(!this.connected||!this.client||!this.identity)return;
+    var prefix=(this.config.topicPrefix||'vetro')+'/'+this.identity,ok=Number.isInteger(value)&&value>=0&&value<=50;
+    if(ok)this.publish(prefix+'/backlight',String(value),{retain:true});
+    this.publish(prefix+'/backlight/availability',ok?'online':'offline',{retain:true});
 };
 
 MqttBridge.prototype.publishTvState = function(d) {
@@ -204,6 +222,7 @@ MqttBridge.prototype._connect = function () {
 
     this.identity=encodeURIComponent(cfg.clientId||this.legacyIdentity.id).replace(/%/g,'_');
     this.availabilityTopic=(cfg.topicPrefix||'vetro')+'/'+this.identity+'/availability';
+    this.backlightCommandTopic=(cfg.topicPrefix||'vetro')+'/'+this.identity+'/backlight/set';this.controlTopics=[this.backlightCommandTopic];
     var client = new MqttClient({
         host: cfg.host,
         port: cfg.port || 1883,
@@ -218,7 +237,7 @@ MqttBridge.prototype._connect = function () {
     client.on('connect', function () {
         if (!self.running || self.client !== client) return;
         self.connected=true;self.state='connected';self.connectedAt=Date.now();self.lastError=null;self.event('connected','MQTT connection confirmed');
-        self.subscriptions=self.topics.map(function(t){client.subscribe(t);return {topic:t,status:'pending'};});
+        self.subscriptions=Array.from(new Set(self.topics.concat(self.controlTopics))).map(function(t){client.subscribe(t);return {topic:t,status:'pending'};});
         self.discovered = false;self.lastPresence = null;self.publish(self.availabilityTopic,'online',{retain:true});
         self._publishTelemetry();
         self._discover();

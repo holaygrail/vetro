@@ -697,7 +697,19 @@ var inputRestoreTimer=setInterval(restoreInput,5000);if(inputRestoreTimer.unref)
 // MQTT bridge: publishes telemetry + Home Assistant discovery when a broker
 // is configured (persistent owner config, /tmp fallback). No-op without config.
 var mqttLastTrigger=Object.create(null);
+// Panel brightness from MQTT: the newest value wins while a write is running.
+var backlightBusy=false,backlightNext=null;
+function setBacklight(payload){
+ var text=String(payload).trim(),value=/^\d{1,2}(\.0+)?$/.test(text)?Math.round(+text):NaN;
+ if(!(value>=0&&value<=50)){bridge.event('error','Panel brightness: invalid value');return;}
+ backlightNext=value;if(backlightBusy)return;backlightBusy=true;
+ (function next(){var v=backlightNext;backlightNext=null;
+  tvSettings.writeLatest('backlight',v).then(function(d){bridge.event('trigger','Panel brightness '+d.previous+' → '+d.value+' read back');return d.value;},function(e){bridge.event('error','Panel brightness: '+e.message);return tvSettings.readOne('backlight').catch(function(){return null;});})
+   .then(function(v){try{bridge.publishBacklight(v);}catch(e){}if(backlightNext!==null)return next();backlightBusy=false;});
+ })();
+}
 var bridge = new MqttBridge(readTelemetry,function(m){
+ if(m.topic===bridge.backlightCommandTopic)return setBacklight(m.payload.toString('utf8'));
  var actions=remap.resolve(remapStore.rules,'mqtt',m.topic,m.payload.toString('utf8'));if(!actions.length)return;
  var now=Date.now();if(pendingActions>=8||now-(mqttLastTrigger[m.topic]||0)<500){bridge.event('throttled','Trigger rate limited: '+m.topic);return;}
  mqttLastTrigger[m.topic]=now;pendingActions++;
@@ -720,6 +732,7 @@ var presenceTimer=setInterval(function(){
 var tvStateTimer=setInterval(function(){
  if(!bridge.connected)return;
  tvState.read().then(function(d){bridge.publishTvState(d);}).catch(function(){bridge.publishTvState(null);});
+ if(!backlightBusy)tvSettings.readOne('backlight').then(function(v){bridge.publishBacklight(v);},function(){bridge.publishBacklight(null);}).catch(function(){});
 },10000);if(tvStateTimer.unref)tvStateTimer.unref();
 
 // Restore only an explicitly saved local domain filter once the adapter is ready.

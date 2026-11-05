@@ -64,6 +64,10 @@ Store.prototype.write=function(p){var self=this,x=ITEMS.find(function(x){return 
  function set(v){return self.execute(PREFIX+x.set+' '+x.signature+' '+v+(x.signature.length>1?' 0':''),5000).then(function(r){if(!/^i 0\s*$/.test(check(r)))throw Error('TV rejected the change');});}
  return get().then(function(before){if(before!==p.expected)throw Error('TV value changed; refresh before saving');return set(p.value).then(get).then(function(after){if(after!==p.value)throw Error('Readback does not match');return {ok:true,verified:true,id:x.id,previous:before,value:after};}).catch(function(e){return set(before).then(get).then(function(restored){e.message+=' · restore '+(restored===before?'confirmed':'not confirmed');throw e;},function(){throw Error(e.message+' · restore not confirmed');});});}).finally(function(){self.cached=null;self.busy=false;});
 };
+// One value, for MQTT state publishing: a single D-Bus call instead of the full settings read.
+Store.prototype.readOne=function(id){var x=ITEMS.find(function(x){return x.id===id});if(!x)return Promise.reject(Error('Unknown setting'));return this.execute(PREFIX+x.get+' '+x.args,5000).then(function(r){return decode(check(r));});};
+// Writes against the value read just before (remote callers such as MQTT have no expected value). Same readback and restore as write().
+Store.prototype.writeLatest=function(id,value){var self=this;return this.readOne(id).then(function(before){return self.write({id:id,value:value,expected:before});});};
 function unwrap(v){if(v&&typeof v==='object'&&Object.prototype.hasOwnProperty.call(v,'type')&&Object.prototype.hasOwnProperty.call(v,'data'))return unwrap(v.data);if(Array.isArray(v))return v.map(unwrap);if(v&&typeof v==='object'){var o={};Object.keys(v).forEach(function(k){o[k]=unwrap(v[k]);});return o;}return v;}
 function networkDecode(output){
  var parts=String(output).split(/__(LINKS|ADDR|ROUTES|ROUTES6)__\n/),sections={connman:parts[0]};for(var i=1;i<parts.length;i+=2)sections[parts[i]]=parts[i+1];
