@@ -40,6 +40,14 @@ internal static class SamsungTvRemoteInputAgent
     private const uint UiDeviceDestroy = 0x00005502;
     private const int UinputUserDeviceSize = 1116;
     private const int UinputNameBytes = 80;
+    // Vetro diagnostics: dropped-event counting and key-state self-check (no effect on forwarding).
+    private const ushort SynchronizationDropped = 3;
+    private const int KeyBitmapBytes = (KeyMaximum / 8) + 1;
+    private const uint EviocGetKey = 0x80000000u | ((uint)KeyBitmapBytes << 16) | 0x4518u;
+    private const int SysnameBytes = 64;
+    private const uint UiGetSysname = 0x80000000u | ((uint)SysnameBytes << 16) | 0x552Cu;
+    private const int StateCheckMilliseconds = 5000;
+    private const int StateHeartbeatMilliseconds = 60000;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PollDescriptor
@@ -69,6 +77,43 @@ internal static class SamsungTvRemoteInputAgent
     {
         private int descriptor = -1;
         private readonly HashSet<ushort> pressedKeys = new HashSet<ushort>();
+        private string node;
+        public string SysName = "";
+
+        public List<int> TrackedKeys()
+        {
+            List<int> result = new List<int>();
+            foreach (ushort code in pressedKeys)
+            {
+                result.Add(code);
+            }
+            result.Sort();
+            return result;
+        }
+
+        // The evdev node of the forwarded device, e.g. /dev/input/event17 (resolved once via sysfs).
+        public string Node()
+        {
+            if (node == null && SysName.Length != 0)
+            {
+                try
+                {
+                    foreach (string entry in Directory.GetDirectories("/sys/class/input/" + SysName))
+                    {
+                        string name = Path.GetFileName(entry);
+                        if (name.StartsWith("event", StringComparison.Ordinal))
+                        {
+                            node = "/dev/input/" + name;
+                            break;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+            return node;
+        }
 
         public UinputForwarder(InputDevice source)
         {
@@ -99,6 +144,11 @@ internal static class SamsungTvRemoteInputAgent
                 if (ioctl_no_argument(descriptor, UiDeviceCreate) != 0)
                 {
                     throw NativeError("UI_DEV_CREATE");
+                }
+                byte[] sysname = new byte[SysnameBytes];
+                if (ioctl_buffer(descriptor, UiGetSysname, sysname) >= 0)
+                {
+                    SysName = Encoding.ASCII.GetString(sysname).TrimEnd('\0');
                 }
             }
             catch
@@ -202,6 +252,9 @@ internal static class SamsungTvRemoteInputAgent
 
     [DllImport(Libc, SetLastError = true, EntryPoint = "ioctl")]
     private static extern int ioctl_no_argument(int descriptor, uint request);
+
+    [DllImport(Libc, SetLastError = true, EntryPoint = "ioctl")]
+    private static extern int ioctl_buffer(int descriptor, uint request, byte[] buffer);
 
     [DllImport(Libc)]
     private static extern int getpid();
@@ -423,11 +476,24 @@ internal static class SamsungTvRemoteInputAgent
                 Events = PollIn,
             },
         };
+        StateMonitor monitor = new StateMonitor(device.Node, inputDescriptor, forwarder);
         while (true)
         {
             descriptors[0].ReturnedEvents = 0;
             descriptors[1].ReturnedEvents = 0;
-            int ready = poll(descriptors, 2, -1);
+            int ready = poll(descriptors, 2, monitor.MillisecondsUntilCheck());
+            if (ready >= 0)
+            {
+                string state = monitor.Check(pressedBlocked);
+                if (state != null)
+                {
+                    WriteAuthenticated(
+                        stream,
+                        nonce,
+                        secret,
+                        "STATE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(state)));
+                }
+            }
             if (ready < 0)
             {
                 if (Marshal.GetLastWin32Error() == InterruptedSystemCall)
@@ -474,6 +540,10 @@ internal static class SamsungTvRemoteInputAgent
                 if (type == EventMiscellaneous && code == MiscellaneousScan)
                 {
                     scanCode = value;
+                }
+                if (type == EventSynchronization && code == SynchronizationDropped)
+                {
+                    monitor.Dropped();
                 }
                 string key;
                 if (!keyNames.TryGetValue(code, out key))
@@ -960,5 +1030,187 @@ internal static class SamsungTvRemoteInputAgent
             output[index] = Convert.ToByte(value.Substring(index * 2, 2), 16);
         }
         return output;
+    }
+
+    // Vetro diagnostics. Every 5 s compares the keys the kernel reports as held on the source
+    // remote, on the forwarded uinput device and in the forwarder's own bookkeeping, and counts
+    // SYN_DROPPED (lost events). A difference that persists over two checks is reported as stuck.
+    // Reports go out as STATE frames on change and every 60 s, and changes are logged to stderr.
+    private sealed class StateMonitor
+    {
+        private readonly string sourceNode;
+        private readonly int sourceDescriptor;
+        private readonly UinputForwarder forwarder;
+        private long nextCheck;
+        private long lastReport;
+        private long checks;
+        private long dropped;
+        private double lastDroppedAt;
+        private int mismatches;
+        private bool stuck;
+        private double stuckSince;
+        private string lastSignature = "";
+
+        public StateMonitor(string node, int descriptor, UinputForwarder forwarder)
+        {
+            sourceNode = node;
+            sourceDescriptor = descriptor;
+            this.forwarder = forwarder;
+            nextCheck = Environment.TickCount64 + StateCheckMilliseconds;
+            lastReport = Environment.TickCount64;
+        }
+
+        public int MillisecondsUntilCheck()
+        {
+            long wait = nextCheck - Environment.TickCount64;
+            return wait <= 0 ? 0 : (int)Math.Min(wait, StateCheckMilliseconds);
+        }
+
+        public void Dropped()
+        {
+            dropped++;
+            lastDroppedAt = Now();
+            Log("SYN_DROPPED on " + sourceNode + " (total " + dropped + ")");
+        }
+
+        public string Check(Dictionary<ushort, bool> pressedBlocked)
+        {
+            long now = Environment.TickCount64;
+            if (now < nextCheck)
+            {
+                return null;
+            }
+            nextCheck = now + StateCheckMilliseconds;
+            checks++;
+            List<int> source = ReadKeys(sourceDescriptor);
+            List<int> forwarded = null;
+            List<int> tracked = null;
+            string forwardedNode = null;
+            List<int> blockedHeld = new List<int>();
+            foreach (KeyValuePair<ushort, bool> entry in pressedBlocked)
+            {
+                if (entry.Value)
+                {
+                    blockedHeld.Add(entry.Key);
+                }
+            }
+            blockedHeld.Sort();
+            bool mismatch = false;
+            if (forwarder != null)
+            {
+                tracked = forwarder.TrackedKeys();
+                forwardedNode = forwarder.Node();
+                if (forwardedNode != null)
+                {
+                    int descriptor = open(forwardedNode, OpenReadOnly | OpenNonblock);
+                    if (descriptor >= 0)
+                    {
+                        forwarded = ReadKeys(descriptor);
+                        close(descriptor);
+                    }
+                }
+                List<int> expected = new List<int>();
+                if (source != null)
+                {
+                    foreach (int code in source)
+                    {
+                        if (!blockedHeld.Contains(code))
+                        {
+                            expected.Add(code);
+                        }
+                    }
+                }
+                mismatch = source == null || forwarded == null
+                    || !SameKeys(expected, forwarded) || !SameKeys(tracked, forwarded);
+            }
+            mismatches = mismatch ? mismatches + 1 : 0;
+            bool nowStuck = mismatches >= 2;
+            if (nowStuck && !stuck)
+            {
+                stuckSince = Now();
+            }
+            stuck = nowStuck;
+            string signature = (stuck ? "stuck" : "ok") + "|" + dropped;
+            bool changed = signature != lastSignature;
+            if (!changed && now - lastReport < StateHeartbeatMilliseconds)
+            {
+                return null;
+            }
+            string json = "{"
+                + "\"event\":\"state\""
+                + ",\"node\":\"" + EscapeJson(sourceNode) + "\""
+                + ",\"ts\":" + Now().ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
+                + ",\"checks\":" + checks
+                + ",\"dropped\":" + dropped
+                + ",\"last_dropped_at\":" + lastDroppedAt.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
+                + ",\"source\":" + JsonKeys(source)
+                + ",\"forwarded\":" + JsonKeys(forwarded)
+                + ",\"tracked\":" + JsonKeys(tracked)
+                + ",\"blocked_held\":" + JsonKeys(blockedHeld)
+                + ",\"forwarded_node\":" + (forwardedNode == null ? "null" : "\"" + EscapeJson(forwardedNode) + "\"")
+                + ",\"mismatch\":" + (mismatch ? "true" : "false")
+                + ",\"stuck\":" + (stuck ? "true" : "false")
+                + ",\"stuck_since\":" + stuckSince.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
+                + ",\"changed\":" + (changed ? "true" : "false")
+                + "}";
+            if (changed && lastSignature.Length != 0)
+            {
+                Log("state " + signature + " " + json);
+            }
+            lastSignature = signature;
+            lastReport = now;
+            return json;
+        }
+
+        private static List<int> ReadKeys(int descriptor)
+        {
+            byte[] bits = new byte[KeyBitmapBytes];
+            if (ioctl_buffer(descriptor, EviocGetKey, bits) < 0)
+            {
+                return null;
+            }
+            List<int> result = new List<int>();
+            for (int code = 0; code <= KeyMaximum; code++)
+            {
+                if ((bits[code / 8] & (1 << (code % 8))) != 0)
+                {
+                    result.Add(code);
+                }
+            }
+            return result;
+        }
+
+        private static bool SameKeys(List<int> left, List<int> right)
+        {
+            if (left == null || right == null || left.Count != right.Count)
+            {
+                return false;
+            }
+            for (int index = 0; index < left.Count; index++)
+            {
+                if (left[index] != right[index])
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static string JsonKeys(List<int> keys)
+        {
+            return keys == null ? "null" : "[" + string.Join(",", keys) + "]";
+        }
+
+        private static double Now()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        }
+
+        private static void Log(string message)
+        {
+            Console.Error.WriteLine(
+                DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture)
+                + " " + message);
+        }
     }
 }

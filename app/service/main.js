@@ -573,13 +573,15 @@ function restoreInput(){
 function stopInput(){inputObservers.forEach(function(b){b.stop();});inputObservers=[];stopFilter();}
 function inputSnapshot(){
     var bridges=inputObservers.length?inputObservers:[physical].concat(filterExtras.map(function(x){return x.bridge;}));
-    if(bridges.length===1)return Object.assign({},physical.status(),{preference:inputPreference()});
+    // Key-state self-checks of every helper (stuck-key and dropped-event diagnosis), one entry per input node.
+    var diagnostics=bridges.map(function(b){var s=b.status();return {node:s.policy.node||null,device:s.policy.device||null,state:s.diagnostics||null,changes:s.diagnosticLog||[]};}).filter(function(d){return d.state||d.changes.length;});
+    if(bridges.length===1)return Object.assign({},physical.status(),{preference:inputPreference(),diagnostics:diagnostics,diagnosticLog:undefined});
     var events=[],connected=false,errors=[];
     bridges.forEach(function(b){var s=b.status();events=events.concat(s.events);connected=connected||s.policy.connected;if(s.error)errors.push(s.error);});
     events.sort(function(a,b){return a.time_seconds-b.time_seconds||a.time_microseconds-b.time_microseconds;});
     var policy=inputObservers.length?{mode:'observe',device:'auto',connected:connected}
         :Object.assign({},physical.status().policy,{device:bridges.map(function(b){return b.status().policy.device;}).filter(Boolean).join(' + ')});
-    return {policy:policy,preference:inputPreference(),events:events.slice(-30),error:errors.join('; ')||null};
+    return {policy:policy,preference:inputPreference(),events:events.slice(-30),error:errors.join('; ')||null,diagnostics:diagnostics};
 }
 function handleInput(req,res){
     if(req.method==='GET')return physical.inventory().then(function(list){serveJson(res,{devices:list,status:inputSnapshot(),error:inputError});}).catch(function(e){serveJson(res,{devices:[],status:inputSnapshot(),error:e.message});});

@@ -17,6 +17,8 @@ function devices(text) {
 function Bridge(execute, onEvent) {
     this.execute = execute; this.onEvent = onEvent; this.current = {mode:'off',connected:false};
     this.events = []; this.server = null; this.socket = null; this.generation = 0; this.lastError=null; this.cancel=null;
+    // Latest key-state self-check from the helper (STATE frames) and the last changes, for stuck-key diagnosis.
+    this.diagnostics = null; this.diagnosticLog = [];
 }
 Bridge.prototype.inventory = function () {
     return this.execute('cat /proc/bus/input/devices',10000).then(function(r){
@@ -24,7 +26,7 @@ Bridge.prototype.inventory = function () {
         return devices(r.stdout);
     });
 };
-Bridge.prototype.status = function () {return {policy:this.current,events:this.events.slice(-30),error:this.lastError};};
+Bridge.prototype.status = function () {return {policy:this.current,events:this.events.slice(-30),error:this.lastError,diagnostics:this.diagnostics,diagnosticLog:this.diagnosticLog.slice()};};
 Bridge.prototype.stop = function () {
     ++this.generation;
     if(this.cancel){var cancel=this.cancel;this.cancel=null;cancel();}
@@ -43,7 +45,7 @@ Bridge.prototype.start = function (device, mode, tokens) {
         if(requestGeneration!==self.generation)throw new Error('input request cancelled');
         var selected=list.find(function(d){return (d.node===device || d.unique && d.name===device) && d.selectable;});
         if (!selected) throw new Error('select a unique physical remote device');
-        self.stop(); self.events=[]; self.lastError=null; var generation=self.generation, secret=crypto.randomBytes(32), nonce=crypto.randomBytes(32), seq=0, authenticated=false;
+        self.stop(); self.events=[]; self.lastError=null; self.diagnostics=null; self.diagnosticLog=[]; var generation=self.generation, secret=crypto.randomBytes(32), nonce=crypto.randomBytes(32), seq=0, authenticated=false;
         self.current={mode:mode,device:selected.name,node:selected.node,connected:false,blocked:mode==='filter'?tokens:[]};
         return new Promise(function(resolve,reject){
             var settled=false, timer;
@@ -66,6 +68,15 @@ Bridge.prototype.start = function (device, mode, tokens) {
                         if(!authenticated){
                             if(fields.length!==9||fields[0]!=='AUTH'||fields[2]!=='0'||fields[3]!=='0'||Buffer.from(fields[4],'base64').toString()!==selected.name||Buffer.from(fields[5],'base64').toString()!==selected.node||fields[8]!==mode){fail(new Error('unexpected input helper identity'));return;}
                             authenticated=true;self.current.connected=true;clearTimeout(timer);settled=true;resolve(self.status());
+                        }else if(fields[0]==='STATE'){
+                            try{
+                                if(fields.length!==2)throw new Error('invalid input state');
+                                var state=JSON.parse(Buffer.from(fields[1],'base64').toString());
+                                if(!state||typeof state!=='object'||state.node!==selected.node)throw new Error('invalid input state');
+                                state.received=Date.now();
+                                self.diagnostics=state;
+                                if(state.changed){self.diagnosticLog.push(state);if(self.diagnosticLog.length>20)self.diagnosticLog.shift();}
+                            }catch(e){fail(e);return;}
                         }else{
                             try{
                                 if(fields.length!==3||fields[0]!=='EVENT'||+fields[1]!==seq+1)throw new Error('invalid input sequence');
@@ -83,7 +94,12 @@ Bridge.prototype.start = function (device, mode, tokens) {
                 var token='/tmp/vetro-input-'+crypto.randomBytes(12).toString('hex')+'.token';
                 var helper=path.join(__dirname,'..','payload','SamsungTvRemoteInputAgent.dll');
                 var args=['127.0.0.1',String(self.server.address().port),token,selected.name+'@'+selected.node,'evdev','TV',mode,mode==='filter'?tokens.join(','):''];
-                var command='umask 077; printf %s '+quote(secret.toString('base64'))+' > '+quote(token)+'; nohup /usr/bin/dotnet '+quote(helper)+' '+args.map(quote).join(' ')+' </dev/null >/tmp/vetro-input.log 2>&1 &';
+                // One appended log per input node (the helpers used to truncate one shared file); rotated at 256 KiB.
+                var log=quote('/tmp/vetro-input-'+selected.node.split('/').pop()+'.log');
+                var command='umask 077; printf %s '+quote(secret.toString('base64'))+' > '+quote(token)+'; '
+                    +'[ "$(stat -c %s '+log+' 2>/dev/null || echo 0)" -gt 262144 ] && mv -f '+log+' '+log+'.1; '
+                    +'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) launch '+mode+'" >> '+log+'; '
+                    +'nohup /usr/bin/dotnet '+quote(helper)+' '+args.map(quote).join(' ')+' </dev/null >>'+log+' 2>&1 &';
                 self.execute(command,5000).then(function(r){if(r.exit_code||r.timed_out)fail(new Error('input helper launch failed'));}).catch(fail);
             });
         });
