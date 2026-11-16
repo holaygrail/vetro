@@ -35,6 +35,7 @@ var privacy = new (require('./privacy.js').Privacy)(agentExecute);
 var menuSettings = new (require('./menu-settings.js').Catalog)(agentExecute);
 var quickSettings = require('./quick-settings.js');
 var leftovers = new (require('./leftovers.js').Leftovers)(agentExecute);
+var keepOff = new (require('./keep-off.js').Keeper)(agentExecute);
 // Components whose disabled flag Vetro may change: verified ACR set plus Quick Settings groups.
 var TOGGLE_IDS = debloat.VERIFIED_GLOBAL_IDS.concat(quickSettings.ALLOWED_IDS);
 // The package builder writes a non-default port into build-info.js (VETRO_PORT=... node build.cjs);
@@ -666,6 +667,7 @@ http.createServer(function (req, res) {
     if (url === '/monitor') { var scope=/[?&]scope=([^&]*)/.exec(req.url||'');if(scope&&!/^(summary|full)$/.test(scope[1]))return serveJson(res,{error:'Unsupported monitor scope'},400);return monitor.snapshot(scope?scope[1]:'full').then(function(d){d.telemetry=readTelemetry();serveJson(res,d);}).catch(function(e){serveJson(res,{error:e.message},503);}); }
     if (url === '/startup') return Promise.all([inventory(false),monitor.startup().catch(function(e){return {error:e.message};})]).then(function(d){serveJson(res,{apps:d[0].apps,services:Array.isArray(d[1])?d[1]:[],serviceError:d[1].error||null});});
     if (url === '/telemetry') return serveJson(res, readTelemetry());
+    if (url === '/keep-off') return serveJson(res, keepOff.status());
     if (url === '/leftovers') return handleLeftovers(req,res);
     if (url === '/status') return serveJson(res, Object.assign({}, platform.status(), {app: buildInfo}));
     if (url === '/screen') return screenSummary().then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},503)});
@@ -752,3 +754,10 @@ var selfStartupAttempts=0,selfStartupBusy=false;var selfStartupTimer=setInterval
 var TELEMETRY_UNITS=['org.tizen.tv.tagpro-service-tv.service','org.tizen.tv.sp-kpi.service'];
 function stopTelemetry(){return agentExecute('systemctl stop '+TELEMETRY_UNITS.join(' ')+' 2>/dev/null; true',30000).catch(function(){});}
 var telemetryAttempts=0;var telemetryTimer=setInterval(function(){if(++telemetryAttempts>60){clearInterval(telemetryTimer);return}if(platform.status().agent.connected){clearInterval(telemetryTimer);stopTelemetry();var again=setTimeout(stopTelemetry,180000);if(again.unref)again.unref();}},5000);if(telemetryTimer.unref)telemetryTimer.unref();
+
+// Samsung's background app updates switch disabled apps and boot switch files back on (S90C, pisa-service update
+// 2026-11-12: the ad agent ran again). keep-off.js puts back only what an install undid. First pass 90 s after the
+// adapter connects (the TV clock and pkgmgr are settled by then), then every 10 minutes, because updates also
+// arrive while the TV is on. A pass is one read; it writes only when something has to go back.
+var keepOffStarted=false;function keepOffPass(){if(debloatBusy||!platform.status().agent.connected)return;keepOff.run().catch(function(){});}
+var keepOffTimer=setInterval(function(){if(keepOffStarted||!platform.status().agent.connected)return;keepOffStarted=true;var first=setTimeout(keepOffPass,90000);if(first.unref)first.unref();var every=setInterval(keepOffPass,600000);if(every.unref)every.unref();clearInterval(keepOffTimer);},5000);if(keepOffTimer.unref)keepOffTimer.unref();
