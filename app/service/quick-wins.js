@@ -196,4 +196,4 @@ Wins.prototype.boot = function (hbbtv) {
     });
 };
 
-module.exports = {Wins: Wins, stop: stop, parse: parse, IDS: IDS, FILE: FILE, AUTOUPDATE: AUTOUPDATE, MULTISCREEN_FLAG: MULTISCREEN_FLAG, AMBIENT_ID: AMBIENT_ID, MULTISCREEN_ID: MULTISCREEN_ID};
+module.exports = {Wins: Wins, stop: stop, parse: parse, wrap: wrap, IDS: IDS, FILE: FILE, AUTOUPDATE: AUTOUPDATE, MULTISCREEN_FLAG: MULTISCREEN_FLAG, AMBIENT_ID: AMBIENT_ID, MULTISCREEN_ID: MULTISCREEN_ID};

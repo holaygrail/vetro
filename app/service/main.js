@@ -640,7 +640,8 @@ http.createServer(function (req, res) {
         if (url === '/debloat') return handleDebloatAction(req, res);
         if (url === '/dns') return readJsonBody(req,res,function(p){var task=p.action==='observe'?dnsFilter.observe():p.action==='apply'?dnsFilter.apply(p.enabled,p.domains):Promise.reject(Error('Invalid filter action'));task.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},503)});});
         if (url === '/wins') return handleWins(req,res);
-        if (url === '/update-lock') return readJsonBody(req,res,function(p){updateLock.set(p.on).then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},409)});});
+        // Shares the app-change guard with /wins: both write Auto update, so they never run at the same time.
+        if (url === '/update-lock') return readJsonBody(req,res,function(p){if(debloatBusy)return serveJson(res,{error:'App change already in progress'},409);debloatBusy=true;updateLock.set(p.on).then(function(d){debloatBusy=false;serveJson(res,d)}).catch(function(e){debloatBusy=false;serveJson(res,{error:e.message},409)});});
         if (url === '/hbbtv') return readJsonBody(req,res,function(p){hbbtv.change(p.off,p.expected).then(function(d){privacy.cached=null;try{wins.remember('hbbtv',d.off);}catch(e){}serveJson(res,d);}).catch(function(e){serveJson(res,{error:e.message},409);});});
         if (url === '/dock') return readJsonBody(req,res,function(p){var t=p.action==='enable'?dock.enable():p.action==='disable'?dock.disable():p.action==='refresh'?dock.refresh():p.action==='fixTizenTube'?dock.setFixTizenTube(p.on):Promise.reject(Error('Invalid dock action'));t.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{ok:false,error:e.message},409)});});
         if (url === '/home-order') return readJsonBody(req,res,function(p){var t=p.action==='restore'?homeOrder.restore():homeOrder.write(p.entries);t.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},409)});});
@@ -766,5 +767,6 @@ var keepOffStarted=false;function keepOffPass(){if(debloatBusy||!platform.status
 var keepOffTimer=setInterval(function(){if(keepOffStarted||!platform.status().agent.connected)return;keepOffStarted=true;var first=setTimeout(keepOffPass,90000);if(first.unref)first.unref();var every=setInterval(keepOffPass,600000);if(every.unref)every.unref();clearInterval(keepOffTimer);},5000);if(keepOffTimer.unref)keepOffTimer.unref();
 
 // Update lock (update-lock.js): runtime masks are gone after a boot, so the lock goes back on as soon as the agent is up,
-// before the SWU timer (OnActiveSec=120) and the background app updater can start anything.
-var updateLockTimer=setInterval(function(){if(!platform.status().agent.connected)return;clearInterval(updateLockTimer);updateLock.boot().catch(function(){});},3000);if(updateLockTimer.unref)updateLockTimer.unref();
+// before the SWU timer (OnActiveSec=120) and the background app updater can start anything, and is tried again every 30 s
+// until the TV confirms it (a busy TV right after boot can make one try fail).
+updateLock.bootRetry(function(){return platform.status().agent.connected;}).catch(function(){});
