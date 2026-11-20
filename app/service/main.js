@@ -36,6 +36,7 @@ var menuSettings = new (require('./menu-settings.js').Catalog)(agentExecute);
 var quickSettings = require('./quick-settings.js');
 var leftovers = new (require('./leftovers.js').Leftovers)(agentExecute);
 var keepOff = new (require('./keep-off.js').Keeper)(agentExecute);
+var updateLock = new (require('./update-lock.js').Lock)(agentExecute);
 // Components whose disabled flag Vetro may change: verified ACR set plus Quick Settings groups.
 var TOGGLE_IDS = debloat.VERIFIED_GLOBAL_IDS.concat(quickSettings.ALLOWED_IDS);
 // The package builder writes a non-default port into build-info.js (VETRO_PORT=... node build.cjs);
@@ -639,6 +640,7 @@ http.createServer(function (req, res) {
         if (url === '/debloat') return handleDebloatAction(req, res);
         if (url === '/dns') return readJsonBody(req,res,function(p){var task=p.action==='observe'?dnsFilter.observe():p.action==='apply'?dnsFilter.apply(p.enabled,p.domains):Promise.reject(Error('Invalid filter action'));task.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},503)});});
         if (url === '/wins') return handleWins(req,res);
+        if (url === '/update-lock') return readJsonBody(req,res,function(p){updateLock.set(p.on).then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},409)});});
         if (url === '/hbbtv') return readJsonBody(req,res,function(p){hbbtv.change(p.off,p.expected).then(function(d){privacy.cached=null;try{wins.remember('hbbtv',d.off);}catch(e){}serveJson(res,d);}).catch(function(e){serveJson(res,{error:e.message},409);});});
         if (url === '/dock') return readJsonBody(req,res,function(p){var t=p.action==='enable'?dock.enable():p.action==='disable'?dock.disable():p.action==='refresh'?dock.refresh():p.action==='fixTizenTube'?dock.setFixTizenTube(p.on):Promise.reject(Error('Invalid dock action'));t.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{ok:false,error:e.message},409)});});
         if (url === '/home-order') return readJsonBody(req,res,function(p){var t=p.action==='restore'?homeOrder.restore():homeOrder.write(p.entries);t.then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},409)});});
@@ -668,6 +670,7 @@ http.createServer(function (req, res) {
     if (url === '/startup') return Promise.all([inventory(false),monitor.startup().catch(function(e){return {error:e.message};})]).then(function(d){serveJson(res,{apps:d[0].apps,services:Array.isArray(d[1])?d[1]:[],serviceError:d[1].error||null});});
     if (url === '/telemetry') return serveJson(res, readTelemetry());
     if (url === '/keep-off') return serveJson(res, keepOff.status());
+    if (url === '/update-lock') return updateLock.read().then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},503)});
     if (url === '/leftovers') return handleLeftovers(req,res);
     if (url === '/status') return serveJson(res, Object.assign({}, platform.status(), {app: buildInfo}));
     if (url === '/screen') return screenSummary().then(function(d){serveJson(res,d)}).catch(function(e){serveJson(res,{error:e.message},503)});
@@ -761,3 +764,7 @@ var telemetryAttempts=0;var telemetryTimer=setInterval(function(){if(++telemetry
 // arrive while the TV is on. A pass is one read; it writes only when something has to go back.
 var keepOffStarted=false;function keepOffPass(){if(debloatBusy||!platform.status().agent.connected)return;keepOff.run().catch(function(){});}
 var keepOffTimer=setInterval(function(){if(keepOffStarted||!platform.status().agent.connected)return;keepOffStarted=true;var first=setTimeout(keepOffPass,90000);if(first.unref)first.unref();var every=setInterval(keepOffPass,600000);if(every.unref)every.unref();clearInterval(keepOffTimer);},5000);if(keepOffTimer.unref)keepOffTimer.unref();
+
+// Update lock (update-lock.js): runtime masks are gone after a boot, so the lock goes back on as soon as the agent is up,
+// before the SWU timer (OnActiveSec=120) and the background app updater can start anything.
+var updateLockTimer=setInterval(function(){if(!platform.status().agent.connected)return;clearInterval(updateLockTimer);updateLock.boot().catch(function(){});},3000);if(updateLockTimer.unref)updateLockTimer.unref();
