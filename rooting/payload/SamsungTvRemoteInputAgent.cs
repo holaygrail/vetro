@@ -23,6 +23,9 @@ internal static class SamsungTvRemoteInputAgent
     private const int OpenReadOnly = 0;
     private const int OpenWriteOnly = 1;
     private const int OpenNonblock = 2048;
+    // O_CLOEXEC: a child process (enlightenment_info) must not inherit the grabbed remote or the uinput device. If it did and
+    // hung, the grab and the forwarded device would outlive this helper, and every new helper would fail EVIOCGRAB.
+    private const int OpenCloseOnExec = 0x80000;
     private const int InterruptedSystemCall = 4;
     private const short PollIn = 1;
     private const short PollError = 8;
@@ -118,7 +121,7 @@ internal static class SamsungTvRemoteInputAgent
 
         public UinputForwarder(InputDevice source)
         {
-            descriptor = open("/dev/uinput", OpenWriteOnly | OpenNonblock);
+            descriptor = open("/dev/uinput", OpenWriteOnly | OpenNonblock | OpenCloseOnExec);
             if (descriptor < 0)
             {
                 throw NativeError("open /dev/uinput");
@@ -197,8 +200,23 @@ internal static class SamsungTvRemoteInputAgent
                             process.StartInfo.RedirectStandardOutput = true;
                             process.StartInfo.RedirectStandardError = true;
                             process.Start();
-                            string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-                            process.WaitForExit(5000);
+                            // Read both pipes asynchronously: a blocking ReadToEnd would wait for ever on a hung tool.
+                            Task<string> standardOutput = process.StandardOutput.ReadToEndAsync();
+                            Task<string> standardError = process.StandardError.ReadToEndAsync();
+                            if (!process.WaitForExit(5000))
+                            {
+                                try
+                                {
+                                    process.Kill();
+                                }
+                                catch (Exception)
+                                {
+                                }
+                                Note("remocon subtype: timed out");
+                                return;
+                            }
+                            string output = (standardOutput.Wait(1000) ? standardOutput.Result : "")
+                                + (standardError.Wait(1000) ? standardError.Result : "");
                             if (output.Contains("Success"))
                             {
                                 Note("remocon subtype: set " + eventNode);
@@ -404,22 +422,12 @@ internal static class SamsungTvRemoteInputAgent
 
     private static void WaitForNoKeyDown(int descriptor)
     {
-        byte[] keys = new byte[KeyBitmapBytes];
         for (int attempt = 0; attempt < 20; attempt++)
         {
-            Array.Clear(keys, 0, keys.Length);
-            if (ioctl_buffer(descriptor, EviocGetKey, keys) < 0)
+            List<int> keys = ReadKeys(descriptor);
+            if (keys == null || keys.Count == 0)
             {
-                return;   // the driver cannot say: grab as before
-            }
-            bool down = false;
-            for (int i = 0; i < keys.Length && !down; i++)
-            {
-                down = keys[i] != 0;
-            }
-            if (!down)
-            {
-                return;
+                return;   // nothing held, or the driver cannot say: grab as before
             }
             if (attempt == 0)
             {
@@ -428,6 +436,43 @@ internal static class SamsungTvRemoteInputAgent
             System.Threading.Thread.Sleep(50);
         }
         Note("grab: a key was still held after 1 s, grabbing anyway");
+    }
+
+    // Reads the input events still queued on a non-blocking descriptor and throws them away; returns how many there were.
+    private static int DiscardQueuedEvents(int descriptor)
+    {
+        int eventSize = IntPtr.Size == 8 ? 24 : 16;
+        byte[] buffer = new byte[eventSize * 64];
+        int discarded = 0;
+        for (int round = 0; round < 1000; round++)
+        {
+            int count = read(descriptor, buffer, buffer.Length);
+            if (count <= 0)
+            {
+                break;
+            }
+            discarded += count / eventSize;
+        }
+        return discarded;
+    }
+
+    // The keys currently down on an evdev node (EVIOCGKEY), or null when the driver cannot say.
+    private static List<int> ReadKeys(int descriptor)
+    {
+        byte[] bits = new byte[KeyBitmapBytes];
+        if (ioctl_buffer(descriptor, EviocGetKey, bits) < 0)
+        {
+            return null;
+        }
+        List<int> result = new List<int>();
+        for (int code = 0; code <= KeyMaximum; code++)
+        {
+            if ((bits[code / 8] & (1 << (code % 8))) != 0)
+            {
+                result.Add(code);
+            }
+        }
+        return result;
     }
 
     private static void Note(string message)
@@ -484,7 +529,7 @@ internal static class SamsungTvRemoteInputAgent
                 {
                     throw new InvalidDataException("invalid challenge length");
                 }
-                int inputDescriptor = open(device.Node, OpenReadOnly | OpenNonblock);
+                int inputDescriptor = open(device.Node, OpenReadOnly | OpenNonblock | OpenCloseOnExec);
                 if (inputDescriptor < 0)
                 {
                     throw NativeError("open " + device.Node);
@@ -513,6 +558,15 @@ internal static class SamsungTvRemoteInputAgent
                             throw NativeError("EVIOCGRAB " + device.Node);
                         }
                         grabbed = true;
+                        // Everything read so far happened before the grab and has already reached the TV directly. It is
+                        // still queued on this descriptor, and the wait for a held key and the busy retries make that queue
+                        // longer exactly while a key is held. Forwarded now, a held Volume-down's repeats would be applied a
+                        // second time, so the queue is dropped.
+                        int discarded = DiscardQueuedEvents(inputDescriptor);
+                        if (discarded > 0)
+                        {
+                            Note("grab: dropped " + discarded + " event(s) from before the grab");
+                        }
                     }
                     WriteAuthenticated(
                         stream,
@@ -1183,7 +1237,7 @@ internal static class SamsungTvRemoteInputAgent
         {
             dropped++;
             lastDroppedAt = Now();
-            Log("SYN_DROPPED on " + sourceNode + " (total " + dropped + ")");
+            Note("SYN_DROPPED on " + sourceNode + " (total " + dropped + ")");
         }
 
         public string Check(Dictionary<ushort, bool> pressedBlocked)
@@ -1215,7 +1269,7 @@ internal static class SamsungTvRemoteInputAgent
                 forwardedNode = forwarder.Node();
                 if (forwardedNode != null)
                 {
-                    int descriptor = open(forwardedNode, OpenReadOnly | OpenNonblock);
+                    int descriptor = open(forwardedNode, OpenReadOnly | OpenNonblock | OpenCloseOnExec);
                     if (descriptor >= 0)
                     {
                         forwarded = ReadKeys(descriptor);
@@ -1268,29 +1322,11 @@ internal static class SamsungTvRemoteInputAgent
                 + "}";
             if (changed && lastSignature.Length != 0)
             {
-                Log("state " + signature + " " + json);
+                Note("state " + signature + " " + json);
             }
             lastSignature = signature;
             lastReport = now;
             return json;
-        }
-
-        private static List<int> ReadKeys(int descriptor)
-        {
-            byte[] bits = new byte[KeyBitmapBytes];
-            if (ioctl_buffer(descriptor, EviocGetKey, bits) < 0)
-            {
-                return null;
-            }
-            List<int> result = new List<int>();
-            for (int code = 0; code <= KeyMaximum; code++)
-            {
-                if ((bits[code / 8] & (1 << (code % 8))) != 0)
-                {
-                    result.Add(code);
-                }
-            }
-            return result;
         }
 
         private static bool SameKeys(List<int> left, List<int> right)
@@ -1317,13 +1353,6 @@ internal static class SamsungTvRemoteInputAgent
         private static double Now()
         {
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-        }
-
-        private static void Log(string message)
-        {
-            Console.Error.WriteLine(
-                DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture)
-                + " " + message);
         }
     }
 }

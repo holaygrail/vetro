@@ -33,6 +33,7 @@ assert.equal(devices('N: Name="panel key device"\nH: Handlers=event3\n')[0].sele
   await bridge.start('Smart Control','filter',['626']).catch(()=>{});bridge.stop();
   const f=commands.filter(x=>x.includes('nohup')).pop();
   assert.ok(f.includes('kill -9'),'stale helper ended with SIGKILL');
+  assert.ok(f.includes('grep -lsF SamsungTvRemoteInputAgent.dll /proc/[0-9]*/cmdline')&&!f.includes('for d in /proc/[0-9]*'),'one grep finds the candidates, no subshell per process');
   assert.ok(f.includes('"@/dev/input/event4 evdev "*filter*')&&f.includes('"@/dev/input/event4evdev"*filter*'),'matched by its own node, with or without separators');
   assert.ok(f.indexOf('kill -9')<f.indexOf('nohup'),'before the new helper starts');
   bad=true;await assert.rejects(bridge.start('Smart Control','observe',[]),/authentication/);assert.equal(bridge.status().policy.mode,'off');

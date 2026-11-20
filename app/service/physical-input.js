@@ -100,7 +100,9 @@ Bridge.prototype.start = function (device, mode, tokens) {
                 // helper fails EVIOCGRAB with EBUSY. End such a helper first, with SIGKILL (a stopped or hung one ignores SIGTERM).
                 // Unlike upstream only the helper of the same node is ended: here one filter helper runs per remote device at once.
                 // The node is matched with what follows it ("evdev"), with or without the separator, so event1 never hits event17.
-                var stale=mode==='filter'&&/^\/dev\/input\/event\d+$/.test(selected.node)?'for d in /proc/[0-9]*; do [ "$(head -c 15 $d/cmdline 2>/dev/null)" = /usr/bin/dotnet ] || continue; case "$(tr \'\\0\' \' \' < $d/cmdline 2>/dev/null)" in *SamsungTvRemoteInputAgent.dll*"@'+selected.node+' evdev "*filter*|*SamsungTvRemoteInputAgent.dll*"@'+selected.node+'evdev"*filter*) kill -9 "${d#/proc/}" 2>/dev/null; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ended stale helper ${d#/proc/}" >> '+log+';; esac; done; ':'';
+                // One grep picks the candidates (a subshell per /proc entry took 1.6 s with the S90C idle, against a 5 s launch
+                // timeout); the dotnet check then also skips this shell and grep, whose command lines contain the same words.
+                var stale=mode==='filter'&&/^\/dev\/input\/event\d+$/.test(selected.node)?'for c in $(grep -lsF SamsungTvRemoteInputAgent.dll /proc/[0-9]*/cmdline 2>/dev/null); do d=${c%/cmdline}; [ "$(head -c 15 $c 2>/dev/null)" = /usr/bin/dotnet ] || continue; case "$(tr \'\\0\' \' \' < $c 2>/dev/null)" in *SamsungTvRemoteInputAgent.dll*"@'+selected.node+' evdev "*filter*|*SamsungTvRemoteInputAgent.dll*"@'+selected.node+'evdev"*filter*) kill -9 "${d#/proc/}" 2>/dev/null; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ended stale helper ${d#/proc/}" >> '+log+';; esac; done; ':'';
                 var command=stale+'umask 077; printf %s '+quote(secret.toString('base64'))+' > '+quote(token)+'; '
                     +'[ "$(stat -c %s '+log+' 2>/dev/null || echo 0)" -gt 262144 ] && mv -f '+log+' '+log+'.1; '
                     +'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) launch '+mode+'" >> '+log+'; '
