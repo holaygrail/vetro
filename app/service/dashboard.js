@@ -579,12 +579,15 @@ function groupItem(g){
 }
 function winItem(id){
  var c=winCopy[id],st=winState(id),w=quickData.wins&&quickData.wins.wins[id]||{},busy=quickBusy||winsBusy;
+ var locked=w.lockedBy==='update-lock';
  var state=!quickData.wins?chip(quickData.winsError||'Reading…',quickData.winsError?'partial':''):st==='unknown'?chip('Not available on this TV','partial'):'';
  if(quickData.wins&&st==='on')state=id==='ambient'?chip('Partly done · Samsung may start it again','partial'):chip(id==='firmware'?'Done · Auto update is off':'Done · Multi View starts when you open it','on');
  if(st==='partial')state=chip('Partly done · Samsung started it again','partial');
  if(st==='off'&&w.running)state=chip('Running now','');
- var control=quickData.wins&&st&&st!=='unknown'?switchMarkup('data-win-switch="'+id+'"',st==='on',busy,c.title):'';
- return quickItem(id,c.title,c.desc,state,control,'<details><summary>What this changes</summary><p>'+esc(c.detail)+'</p></details>');
+ if(locked&&st==='on')state=chip('Done · set by the update lock','on');
+ var control=quickData.wins&&st&&st!=='unknown'?switchMarkup('data-win-switch="'+id+'"',st==='on',busy||locked,c.title):'';
+ var note=locked?'<p class="section-note">The update lock is on and keeps Auto update off; it puts the earlier value back when it ends. Switch the lock off to change this here.</p>':'';
+ return quickItem(id,c.title,c.desc,state,control,note+'<details><summary>What this changes</summary><p>'+esc(c.detail)+'</p></details>');
 }
 function hbbtvItem(){
  var h=hbbtvData,c=winCopy.hbbtv,state='',control='';

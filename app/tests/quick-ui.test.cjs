@@ -58,5 +58,9 @@ const tick=()=>new Promise(r=>setImmediate(r));
  const hb={dataset:{hbbtvDisable:''},checked:false};await el('quick').onchange({target:hb});await tick();await tick();
  assert.deepEqual(calls.filter(c=>c.url==='/hbbtv'&&c.body).at(-1).body,{off:false,expected:19},'switching the win off turns HbbTV back on');
  const clear={dataset:{leftoversClear:''}};el('quick').onclick({target:{closest:()=>clear}});assert.match(el('quickStorage').innerHTML,/Delete 1 package file \(2 KiB\)\?/);assert.ok(!calls.some(c=>c.url==='/leftovers'&&c.body),'cleanup needs confirmation');
+ // The update lock owns Auto update while it is on: switch disabled, said so.
+ sandbox.quickData.wins={ts:2,wins:{firmware:{status:'on',value:0,lockedBy:'update-lock'},multiscreen:{status:'on',running:false},ambient:{status:'off',running:false}}};sandbox.renderQuick();
+ const lockedHtml=el('quickControl').innerHTML;
+ assert.match(lockedHtml,/Done · set by the update lock/);assert.match(lockedHtml,/data-win-switch="firmware" checked disabled/);assert.match(lockedHtml,/Switch the lock off to change this here/);
  console.log('PASS quick UI: wins read as done or not, partial states, new switches, microphone confirmation, shared inventory, cleanup confirmation');
 })().catch(e=>{console.error(e);process.exitCode=1});

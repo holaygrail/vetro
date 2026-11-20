@@ -70,6 +70,9 @@ function Wins(execute, options) {
     this.bootId = options.bootId || function () { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch (e) { return null; } };
     // Only tests and older builds that do not offer the Ambient win set this: a saved choice is then not acted on.
     this.skipAmbient = !!options.skipAmbient;
+    // While the update lock (update-lock.js) is chosen it owns Auto update: it set 0 and writes the earlier value back when
+    // it ends. The win then only shows the state; a change here would undo the lock or be undone by it.
+    this.firmwareLocked = options.firmwareLocked || function () { return false; };
     this.busy = false;
 }
 
@@ -102,6 +105,7 @@ Wins.prototype.read = function () {
     return this.execute(wrap(READ), 10000).then(function (r) {
         var s = parse(check(r)), mine = self.load();
         var firmware = s.autoupdate === null ? {status: 'unknown'} : {status: s.autoupdate === 0 ? 'on' : 'off', value: s.autoupdate};
+        if (self.firmwareLocked()) firmware.lockedBy = 'update-lock';
         var multiscreen = s.multiscreenFlag === null ? {status: 'unknown'} : {status: s.multiscreenFlag ? 'on' : 'off', running: s.multiscreenRunning === true};
         var ambient = s.ambientRunning === null ? {status: 'unknown'}
             : {status: !mine.ambient ? 'off' : s.ambientRunning ? 'partial' : 'on', running: s.ambientRunning, chosen: mine.ambient};
@@ -113,6 +117,7 @@ Wins.prototype.apply = function (id, on) {
     var self = this;
     if (IDS.indexOf(id) < 0) return Promise.reject(Error('Unknown quick win'));
     if (typeof on !== 'boolean') return Promise.reject(Error('Invalid state'));
+    if (id === 'firmware' && this.firmwareLocked()) return Promise.reject(Error('Auto update is set by the update lock while it is on. Switch the lock off first.'));
     if (this.busy) return Promise.reject(Error('A quick win is already being changed'));
     this.busy = true;
     var task = id === 'firmware' ? this.firmware(on) : id === 'multiscreen' ? this.multiscreen(on) : this.ambient(on);

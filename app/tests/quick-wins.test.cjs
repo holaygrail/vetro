@@ -70,6 +70,12 @@ const noWait=()=>Promise.resolve();
  t=tv();w=new qw.Wins(t.execute,{fs:store(),sleep:noWait,bootId:()=>'b'});
  assert.deepEqual(await w.boot(fake),[]);assert.equal(calls.length,0,'not chosen: untouched');
  w.remember('hbbtv',true);assert.deepEqual(await w.boot(fake),['hbbtv']);
+ // While the update lock is chosen it owns Auto update: the win shows the state, refuses a change, writes nothing.
+ let lockOn=true;t=tv();w=new qw.Wins(t.execute,{fs:store(),sleep:noWait,bootId:()=>'b',firmwareLocked:()=>lockOn});
+ const locked=await w.read();assert.equal(locked.wins.firmware.lockedBy,'update-lock');assert.equal(locked.wins.multiscreen.lockedBy,undefined);
+ const writes=()=>t.s.calls.filter(c=>/vconftool set/.test(c)).length,w0=writes();
+ await assert.rejects(w.apply('firmware',false),/set by the update lock/);assert.equal(writes(),w0,'nothing written');assert.equal(w.busy,false);
+ lockOn=false;assert.equal((await w.read()).wins.firmware.lockedBy,undefined,'lock off: the win is free again');
  // Misuse
  await assert.rejects(w.apply('nope',true),/Unknown/);await assert.rejects(w.apply('firmware','yes'),/Invalid/);
  assert.throws(()=>w.remember('firmware',true),/Unknown/);
