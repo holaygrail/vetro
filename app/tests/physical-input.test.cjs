@@ -28,8 +28,15 @@ assert.equal(devices('N: Name="panel key device"\nH: Handlers=event3\n')[0].sele
   assert.ok(commands.some(c=>/>>'\/tmp\/vetro-input-event4\.log' 2>&1 &$/.test(c)),'per-node appended helper log');
   bridge.stop();assert.equal(bridge.status().policy.mode,'off');
   await assert.rejects(bridge.start('Smart Control','filter',[]),/physical rule/);
+  assert.ok(commands.filter(x=>x.includes('nohup')).every(c=>!c.includes('kill')),'an observer start ends no helper');
+  // A filter start ends a stale filter helper of the same node only (one filter helper runs per remote device), with SIGKILL.
+  await bridge.start('Smart Control','filter',['626']).catch(()=>{});bridge.stop();
+  const f=commands.filter(x=>x.includes('nohup')).pop();
+  assert.ok(f.includes('kill -9'),'stale helper ended with SIGKILL');
+  assert.ok(f.includes('"@/dev/input/event4 evdev "*filter*')&&f.includes('"@/dev/input/event4evdev"*filter*'),'matched by its own node, with or without separators');
+  assert.ok(f.indexOf('kill -9')<f.indexOf('nohup'),'before the new helper starts');
   bad=true;await assert.rejects(bridge.start('Smart Control','observe',[]),/authentication/);assert.equal(bridge.status().policy.mode,'off');
-  assert.equal(commands.filter(x=>x.includes('nohup')).length,2);
+  assert.equal(commands.filter(x=>x.includes('nohup')).length,3);
   console.log('PASS physical input: exact devices, authenticated events, state frames, per-node log, stop, reject invalid MAC');
  }finally{bridge.stop();if(socket)socket.destroy();}
 })().catch(e=>{console.error(e);process.exitCode=1});

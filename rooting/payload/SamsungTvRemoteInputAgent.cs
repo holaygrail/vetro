@@ -40,6 +40,7 @@ internal static class SamsungTvRemoteInputAgent
     private const uint UiDeviceDestroy = 0x00005502;
     private const int UinputUserDeviceSize = 1116;
     private const int UinputNameBytes = 80;
+    private const int DeviceBusy = 16;   // EBUSY
     // Vetro diagnostics: dropped-event counting and key-state self-check (no effect on forwarding).
     private const ushort SynchronizationDropped = 3;
     private const int KeyBitmapBytes = (KeyMaximum / 8) + 1;
@@ -149,6 +150,7 @@ internal static class SamsungTvRemoteInputAgent
                 if (ioctl_buffer(descriptor, UiGetSysname, sysname) >= 0)
                 {
                     SysName = Encoding.ASCII.GetString(sysname).TrimEnd('\0');
+                    MarkAsRemoteControl();
                 }
             }
             catch
@@ -156,6 +158,66 @@ internal static class SamsungTvRemoteInputAgent
                 Dispose();
                 throw;
             }
+        }
+
+        // Upstream 80e37b8 + 97ead62 (0.7.0): the TV's keyrouter gives the Remocon subclass by device name (a list of
+        // Samsung remotes); "vetro-forwarded-remote" is not on it, so the copy is taken for a keyboard and the on-screen
+        // keyboard hides on its first key (upstream issue #143). Tizen 9 can be told the subclass with enlightenment_info
+        // (-input_subtype_set exists on the S90C, 2220.4). One fixed outcome line goes to the per-node log.
+        private void MarkAsRemoteControl()
+        {
+            if (SysName.Length == 0 || SysName.IndexOf('/') >= 0)
+            {
+                return;
+            }
+            Task.Run(() =>
+            {
+                bool asked = false;
+                try
+                {
+                    for (int attempt = 0; attempt < 12; attempt++)
+                    {
+                        System.Threading.Thread.Sleep(250);
+                        string eventNode = Node();
+                        if (eventNode == null)
+                        {
+                            continue;
+                        }
+                        if (!File.Exists("/usr/bin/enlightenment_info"))
+                        {
+                            Note("remocon subtype: no tool");
+                            return;
+                        }
+                        asked = true;
+                        using (System.Diagnostics.Process process = new System.Diagnostics.Process())
+                        {
+                            process.StartInfo.FileName = "/usr/bin/enlightenment_info";
+                            process.StartInfo.Arguments = "-input_subtype_set " + eventNode + " Remocon";
+                            process.StartInfo.UseShellExecute = false;
+                            process.StartInfo.RedirectStandardOutput = true;
+                            process.StartInfo.RedirectStandardError = true;
+                            process.Start();
+                            string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+                            process.WaitForExit(5000);
+                            if (output.Contains("Success"))
+                            {
+                                Note("remocon subtype: set " + eventNode);
+                                return;
+                            }
+                            if (output.Contains("unknown option"))
+                            {
+                                Note("remocon subtype: unsupported");
+                                return;
+                            }
+                        }
+                    }
+                    Note(asked ? "remocon subtype: refused" : "remocon subtype: no node");
+                }
+                catch (Exception)
+                {
+                    Note("remocon subtype: failed");
+                }
+            });
         }
 
         public void Forward(byte[] inputEvent)
@@ -340,6 +402,41 @@ internal static class SamsungTvRemoteInputAgent
         }
     }
 
+    private static void WaitForNoKeyDown(int descriptor)
+    {
+        byte[] keys = new byte[KeyBitmapBytes];
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            Array.Clear(keys, 0, keys.Length);
+            if (ioctl_buffer(descriptor, EviocGetKey, keys) < 0)
+            {
+                return;   // the driver cannot say: grab as before
+            }
+            bool down = false;
+            for (int i = 0; i < keys.Length && !down; i++)
+            {
+                down = keys[i] != 0;
+            }
+            if (!down)
+            {
+                return;
+            }
+            if (attempt == 0)
+            {
+                Note("grab: waiting for a held key to be released");
+            }
+            System.Threading.Thread.Sleep(50);
+        }
+        Note("grab: a key was still held after 1 s, grabbing anyway");
+    }
+
+    private static void Note(string message)
+    {
+        Console.Error.WriteLine(
+            DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture)
+            + " " + message);
+    }
+
     private static void Run(
         string host,
         int port,
@@ -372,7 +469,11 @@ internal static class SamsungTvRemoteInputAgent
                 true);
             using (NetworkStream stream = client.GetStream())
             {
+                // Upstream fc89023: the service writes its hello at once; a helper whose service never speaks (or is
+                // gone) must not sit there for ever, so the first read gives up after 10 s.
+                client.ReceiveTimeout = 10000;
                 string hello = ReadLine(stream);
+                client.ReceiveTimeout = 0;
                 string[] helloFields = hello.Split('\t');
                 if (helloFields.Length != 2 || helloFields[0] != ProtocolVersion)
                 {
@@ -395,7 +496,19 @@ internal static class SamsungTvRemoteInputAgent
                     if (filter)
                     {
                         forwarder = new UinputForwarder(device);
-                        if (ioctl_integer(inputDescriptor, EviocGrab, 1) != 0)
+                        // Upstream 1d00aa0: a key held down at the moment of the grab is released through the copy while the
+                        // remote still counts it as down, and Tizen 9 drops a release whose code is down on another device,
+                        // so the key keeps reading as held (a candidate for the 2026-11-08 volume drop). Wait up to 1 s.
+                        WaitForNoKeyDown(inputDescriptor);
+                        // Upstream fc89023: EBUSY while a helper of an earlier start still lets go of the remote; the service
+                        // ends a stale helper of the same node first, a short retry covers the rest.
+                        int grab = ioctl_integer(inputDescriptor, EviocGrab, 1);
+                        for (int attempt = 0; grab != 0 && Marshal.GetLastWin32Error() == DeviceBusy && attempt < 5; attempt++)
+                        {
+                            System.Threading.Thread.Sleep(300);
+                            grab = ioctl_integer(inputDescriptor, EviocGrab, 1);
+                        }
+                        if (grab != 0)
                         {
                             throw NativeError("EVIOCGRAB " + device.Node);
                         }

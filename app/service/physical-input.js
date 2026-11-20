@@ -96,7 +96,12 @@ Bridge.prototype.start = function (device, mode, tokens) {
                 var args=['127.0.0.1',String(self.server.address().port),token,selected.name+'@'+selected.node,'evdev','TV',mode,mode==='filter'?tokens.join(','):''];
                 // One appended log per input node (the helpers used to truncate one shared file); rotated at 256 KiB.
                 var log=quote('/tmp/vetro-input-'+selected.node.split('/').pop()+'.log');
-                var command='umask 077; printf %s '+quote(secret.toString('base64'))+' > '+quote(token)+'; '
+                // Upstream fc89023 + 3837bfc (0.7.0): a filter helper left from an earlier start keeps the remote grabbed and every new
+                // helper fails EVIOCGRAB with EBUSY. End such a helper first, with SIGKILL (a stopped or hung one ignores SIGTERM).
+                // Unlike upstream only the helper of the same node is ended: here one filter helper runs per remote device at once.
+                // The node is matched with what follows it ("evdev"), with or without the separator, so event1 never hits event17.
+                var stale=mode==='filter'&&/^\/dev\/input\/event\d+$/.test(selected.node)?'for d in /proc/[0-9]*; do [ "$(head -c 15 $d/cmdline 2>/dev/null)" = /usr/bin/dotnet ] || continue; case "$(tr \'\\0\' \' \' < $d/cmdline 2>/dev/null)" in *SamsungTvRemoteInputAgent.dll*"@'+selected.node+' evdev "*filter*|*SamsungTvRemoteInputAgent.dll*"@'+selected.node+'evdev"*filter*) kill -9 "${d#/proc/}" 2>/dev/null; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ended stale helper ${d#/proc/}" >> '+log+';; esac; done; ':'';
+                var command=stale+'umask 077; printf %s '+quote(secret.toString('base64'))+' > '+quote(token)+'; '
                     +'[ "$(stat -c %s '+log+' 2>/dev/null || echo 0)" -gt 262144 ] && mv -f '+log+' '+log+'.1; '
                     +'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) launch '+mode+'" >> '+log+'; '
                     +'nohup /usr/bin/dotnet '+quote(helper)+' '+args.map(quote).join(' ')+' </dev/null >>'+log+' 2>&1 &';
